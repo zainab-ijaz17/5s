@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "266664404354",
+    "project_id": "five-s-app-1",
+    "storage_bucket": "five-s-app-1.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:266664404354:android:e36ac88b7d0d0e26e05b9b",
+        "android_client_info": {
+          "package_name": "com.zeynabijaz.five_s_digital_assessment"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCPBf-OCLX_y8MMkEIfE-uWWWY0k1tE-b0"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
