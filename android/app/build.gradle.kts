@@ -7,6 +7,17 @@ if (keystorePropertiesFile.exists()) {
     keystoreProperties.load(FileInputStream(keystorePropertiesFile))
 }
 
+fun releaseKeystoreIsConfigured(): Boolean {
+    if (!keystorePropertiesFile.exists()) return false
+    val path = keystoreProperties.getProperty("storeFile") ?: return false
+    val store = file(path)
+    if (!store.isFile) return false
+    val alias = keystoreProperties.getProperty("keyAlias")
+    val storePwd = keystoreProperties.getProperty("storePassword")
+    val keyPwd = keystoreProperties.getProperty("keyPassword")
+    return !alias.isNullOrBlank() && !storePwd.isNullOrBlank() && !keyPwd.isNullOrBlank()
+}
+
 plugins {
     id("com.android.application")
     id("kotlin-android")
@@ -23,11 +34,11 @@ android {
 
     signingConfigs {
         create("release") {
-            if (keystorePropertiesFile.exists()) {
-                keyAlias = keystoreProperties["keyAlias"] as String? ?: ""
-                keyPassword = keystoreProperties["keyPassword"] as String? ?: ""
-                storeFile = keystoreProperties["storeFile"]?.let { file(it) }
-                storePassword = keystoreProperties["storePassword"] as String? ?: ""
+            if (releaseKeystoreIsConfigured()) {
+                keyAlias = keystoreProperties.getProperty("keyAlias")
+                keyPassword = keystoreProperties.getProperty("keyPassword")
+                storeFile = file(keystoreProperties.getProperty("storeFile")!!)
+                storePassword = keystoreProperties.getProperty("storePassword")
             }
         }
     }
@@ -51,7 +62,12 @@ android {
 
     buildTypes {
         release {
-            signingConfig = signingConfigs.getByName("release")
+            // Avoid NPE in signReleaseBundle when storeFile is missing or invalid.
+            signingConfig = if (releaseKeystoreIsConfigured()) {
+                signingConfigs.getByName("release")
+            } else {
+                signingConfigs.getByName("debug")
+            }
             isMinifyEnabled = false
             isShrinkResources = false
             // ProGuard rules (not needed when minify is disabled, but kept for future use)

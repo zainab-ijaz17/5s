@@ -54,12 +54,17 @@ class EmailService {
 
   // Local email log storage
   static final List<Map<String, dynamic>> _emailLog = [];
+  static String? _lastError;
 
   // Get email log for debugging
   static List<Map<String, dynamic>> getEmailLog() => List.from(_emailLog);
+  static String? get lastError => _lastError;
 
   // Clear email log
-  static void clearEmailLog() => _emailLog.clear();
+  static void clearEmailLog() {
+    _emailLog.clear();
+    _lastError = null;
+  }
 
   // Set email provider
   static void setEmailProvider(EmailProvider provider) => _provider = provider;

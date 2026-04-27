@@ -32,17 +32,54 @@ class _AssessmentScreenState extends State<AssessmentScreen> {
     final List<String> urls = [];
 
     for (final file in files) {
-      final fileName = file.path.split(Platform.pathSeparator).last;
-      final ref = storage
-          .ref()
-          .child('assessments')
-          .child(assessmentId)
-          .child('q${questionIndex + 1}')
-          .child(fileName);
+      try {
+        final exists = await file.exists();
+        if (!exists) {
+          throw Exception('Selected image no longer exists on device.');
+        }
 
-      final task = await ref.putFile(file);
-      final url = await task.ref.getDownloadURL();
-      urls.add(url);
+        final fileName = file.path.split(Platform.pathSeparator).last;
+        final ref = storage
+            .ref()
+            .child('assessments')
+            .child(assessmentId)
+            .child('q${questionIndex + 1}')
+            .child(fileName);
+
+        await ref.putFile(
+          file,
+          SettableMetadata(contentType: 'image/jpeg'),
+        );
+
+        // In some environments, download URL generation may briefly lag behind upload.
+        String? url;
+        Object? lastError;
+        for (int attempt = 0; attempt < 3; attempt++) {
+          try {
+            url = await ref.getDownloadURL();
+            break;
+          } catch (e) {
+            lastError = e;
+            if (attempt < 2) {
+              await Future.delayed(
+                Duration(milliseconds: 500 * (attempt + 1)),
+              );
+            }
+          }
+        }
+
+        if (url == null || url.isEmpty) {
+          throw Exception(
+            'Upload completed but download URL was not available. ${lastError ?? ''}',
+          );
+        }
+
+        urls.add(url);
+      } catch (e) {
+        throw Exception(
+          'Image upload failed for Question ${questionIndex + 1} (${file.path}): $e',
+        );
+      }
     }
 
     return urls;
@@ -333,157 +370,181 @@ class _AssessmentScreenState extends State<AssessmentScreen> {
   }
 
   Future<void> _submitAssessment() async {
-    final appState = Provider.of<AppState>(context, listen: false);
+    try {
+      final appState = Provider.of<AppState>(context, listen: false);
 
-    final totalQuestions = questions.length;
+      final totalQuestions = questions.length;
 
-    // Require image only if answer is "No"
-    for (int i = 0; i < totalQuestions; i++) {
-      final answer = _answers[i];
+      // Require image only if answer is "No"
+      for (int i = 0; i < totalQuestions; i++) {
+        final answer = _answers[i];
 
-      if (answer == 'No') {
-        final images = _questionImages[i];
+        if (answer == 'No') {
+          final images = _questionImages[i];
 
-        if (images == null || images.isEmpty) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text(
-                'Please upload an image for Question ${i + 1} (answered No).',
+          if (images == null || images.isEmpty) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text(
+                  'Please upload an image for Question ${i + 1} (answered No).',
+                ),
+                backgroundColor: const Color(0xFFEF4444),
               ),
-              backgroundColor: const Color(0xFFEF4444),
-            ),
-          );
-          return;
+            );
+            return;
+          }
         }
       }
-    }
 
-    final applicableQuestions = _answers.values.where((a) => a != 'N/A').length;
+      final applicableQuestions =
+          _answers.values.where((a) => a != 'N/A').length;
 
-    final yesCount = _answers.values.where((a) => a == 'Yes').length;
+      final yesCount = _answers.values.where((a) => a == 'Yes').length;
 
-    final score = applicableQuestions > 0
-        ? ((yesCount / applicableQuestions) * 100).round()
-        : 0;
+      final score = applicableQuestions > 0
+          ? ((yesCount / applicableQuestions) * 100).round()
+          : 0;
 
-    final isFlagged = score < 90;
+      final isFlagged = score < 90;
 
-    final String assessmentIdForUpload =
-        _editing?.id ?? DateTime.now().millisecondsSinceEpoch.toString();
+      final String assessmentIdForUpload =
+          _editing?.id ?? DateTime.now().millisecondsSinceEpoch.toString();
 
-    final List<Map<String, dynamic>> items = [];
-    for (int index = 0; index < totalQuestions; index++) {
-      final localPaths =
-          _questionImages[index]?.map((img) => img.path).toList() ?? <String>[];
-      final files = _questionImages[index] ?? <File>[];
-      final urls = files.isNotEmpty
-          ? await _uploadImagesToStorage(assessmentIdForUpload, index, files)
-          : <String>[];
+      final List<Map<String, dynamic>> items = [];
+      for (int index = 0; index < totalQuestions; index++) {
+        final localPaths = _questionImages[index]
+                ?.map((img) => img.path)
+                .toList() ??
+            <String>[];
+        final files = _questionImages[index] ?? <File>[];
+        final urls = files.isNotEmpty
+            ? await _uploadImagesToStorage(assessmentIdForUpload, index, files)
+            : <String>[];
 
-      items.add({
-        'question': questions[index]['question'],
-        'answer': _answers[index] ?? 'N/A',
-        'remarks': _questionComments[index] ?? '',
-        'imagePaths': localPaths,
-        'imageUrls': urls,
-        'isFlagged': (_answers[index] == 'No' || _answers[index] == 'N/A'),
-      });
-    }
+        items.add({
+          'question': questions[index]['question'],
+          'answer': _answers[index] ?? 'N/A',
+          'remarks': _questionComments[index] ?? '',
+          'imagePaths': localPaths,
+          'imageUrls': urls,
+          'isFlagged': (_answers[index] == 'No' || _answers[index] == 'N/A'),
+        });
+      }
 
-    String assessmentIdToView;
+      String assessmentIdToView;
 
-    if (_editing != null) {
-      final updated = SubmittedAssessment(
-        id: _editing!.id,
-        company: _editing!.company,
-        auditorName: _editing!.auditorName,
-        auditeeName: _editing!.auditeeName,
-        date: DateTime.now(),
-        items: items,
-        score: score,
-        isFlagged: isFlagged,
-        bu: _editing!.bu,
-        section: _editing!.section,
-        followUpDueAt: isFlagged
-            ? (_editing!.followUpDueAt ??
-                DateTime.now().add(const Duration(days: 14)))
-            : null,
-        followUpSent: _editing!.followUpSent,
-        resolved: !isFlagged,
-        resolvedAt: !isFlagged ? DateTime.now() : null,
-        resolvedBy: !isFlagged ? (appState.currentUser?.name) : null,
-      );
+      if (_editing != null) {
+        final updated = SubmittedAssessment(
+          id: _editing!.id,
+          company: _editing!.company,
+          auditorName: _editing!.auditorName,
+          auditeeName: _editing!.auditeeName,
+          date: DateTime.now(),
+          items: items,
+          score: score,
+          isFlagged: isFlagged,
+          bu: _editing!.bu,
+          section: _editing!.section,
+          followUpDueAt: isFlagged
+              ? (_editing!.followUpDueAt ??
+                  DateTime.now().add(const Duration(days: 14)))
+              : null,
+          followUpSent: _editing!.followUpSent,
+          resolved: !isFlagged,
+          resolvedAt: !isFlagged ? DateTime.now() : null,
+          resolvedBy: !isFlagged ? (appState.currentUser?.name) : null,
+        );
 
-      appState.updateSubmittedAssessment(updated);
-      assessmentIdToView = updated.id;
+        appState.updateSubmittedAssessment(updated);
+        assessmentIdToView = updated.id;
 
-      // Send assessment email for updated assessment
-      try {
         final emailSent = await EmailService.sendAssessmentEmail(updated);
         if (emailSent) {
           print('Updated assessment email sent successfully');
         } else {
-          print('Failed to send updated assessment email');
+          final error = EmailService.lastError ?? 'Unknown email error.';
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text('Assessment submitted but email failed: $error'),
+                backgroundColor: const Color(0xFFEF4444),
+                duration: const Duration(seconds: 6),
+              ),
+            );
+          }
         }
-      } catch (e) {
-        print('Error sending updated assessment email: $e');
-      }
-    } else {
-      final submitted = SubmittedAssessment(
-        id: assessmentIdForUpload,
-        company: appState.selectedCompany ?? 'Unknown',
-        bu: appState.selectedBU,
-        section: appState.selectedSection,
-        auditorName: appState.auditorName ?? 'Unknown Auditor',
-        auditeeName: appState.auditeeName ?? 'Unknown Auditee',
-        date: DateTime.now(),
-        items: items,
-        score: score,
-        isFlagged: isFlagged,
-        followUpDueAt:
-            isFlagged ? DateTime.now().add(const Duration(days: 14)) : null,
-      );
+      } else {
+        final submitted = SubmittedAssessment(
+          id: assessmentIdForUpload,
+          company: appState.selectedCompany ?? 'Unknown',
+          bu: appState.selectedBU,
+          section: appState.selectedSection,
+          auditorName: appState.auditorName ?? 'Unknown Auditor',
+          auditeeName: appState.auditeeName ?? 'Unknown Auditee',
+          date: DateTime.now(),
+          items: items,
+          score: score,
+          isFlagged: isFlagged,
+          followUpDueAt:
+              isFlagged ? DateTime.now().add(const Duration(days: 14)) : null,
+        );
 
-      appState.addSubmittedAssessment(submitted);
+        appState.addSubmittedAssessment(submitted);
 
-      assessmentIdToView = submitted.id;
+        assessmentIdToView = submitted.id;
 
-      // Send assessment email
-      try {
         final emailSent = await EmailService.sendAssessmentEmail(submitted);
         if (emailSent) {
           print('Assessment email sent successfully');
         } else {
-          print('Failed to send assessment email');
+          final error = EmailService.lastError ?? 'Unknown email error.';
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text('Assessment submitted but email failed: $error'),
+                backgroundColor: const Color(0xFFEF4444),
+                duration: const Duration(seconds: 6),
+              ),
+            );
+          }
         }
-      } catch (e) {
-        print('Error sending assessment email: $e');
+
+        // Save assessment to user record
+        await _saveAssessmentToUser(submitted);
       }
 
-      // Save assessment to user record
-      await _saveAssessmentToUser(submitted);
+      Navigator.of(context).pushNamed(
+        '/assessmentResults',
+        arguments: {
+          'assessmentId': assessmentIdToView,
+          'showLogoutOnBack': true,
+          'businessUnit': _editing?.bu ??
+              appState.selectedBU ??
+              appState.selectedCompany ??
+              'Unknown',
+          'score': score,
+          'isFlagged': isFlagged,
+          'resolved': _editing != null ? !isFlagged : false,
+          'assessmentData': items,
+          'auditorName': _editing?.auditorName ??
+              (appState.auditorName ?? 'Unknown Auditor'),
+          'auditeeName': _editing?.auditeeName ??
+              (appState.auditeeName ?? 'Unknown Auditee'),
+          'assessmentDate': DateTime.now().toString().split(' ')[0],
+        },
+      );
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Submit failed: $e'),
+            backgroundColor: const Color(0xFFEF4444),
+            duration: const Duration(seconds: 6),
+          ),
+        );
+      }
+      print('Submit assessment failed: $e');
     }
-
-    Navigator.of(context).pushNamed(
-      '/assessmentResults',
-      arguments: {
-        'assessmentId': assessmentIdToView,
-        'showLogoutOnBack': true,
-        'businessUnit': _editing?.bu ??
-            appState.selectedBU ??
-            appState.selectedCompany ??
-            'Unknown',
-        'score': score,
-        'isFlagged': isFlagged,
-        'resolved': _editing != null ? !isFlagged : false,
-        'assessmentData': items,
-        'auditorName': _editing?.auditorName ??
-            (appState.auditorName ?? 'Unknown Auditor'),
-        'auditeeName': _editing?.auditeeName ??
-            (appState.auditeeName ?? 'Unknown Auditee'),
-        'assessmentDate': DateTime.now().toString().split(' ')[0],
-      },
-    );
   }
 
   Future<void> _saveAssessmentToUser(SubmittedAssessment assessment) async {

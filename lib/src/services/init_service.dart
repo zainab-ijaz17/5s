@@ -1,12 +1,9 @@
 import 'package:flutter/foundation.dart';
-import 'question_service.dart';
 
 class InitService {
   static Future<void> initializeServices() async {
     try {
-      // Initialize default questions if they don't exist
-      await QuestionService().initializeDefaultQuestions();
-      
+      // Reserved for future app-wide service initialization.
       if (kDebugMode) {
         print('✅ Services initialized successfully');
       }
