@@ -1,14 +1,17 @@
 import 'package:flutter/material.dart';
 
 import '../../routes.dart';
+import '../widgets/role_bottom_nav.dart';
+import '../navigation/role_section.dart';
+import '../services/assessment_service.dart';
+import '../services/session_service.dart';
 
 import 'package:provider/provider.dart';
-
-import 'package:cloud_firestore/cloud_firestore.dart';
 
 import '../state/app_state.dart';
 
 import '../models/submitted_assessment.dart';
+import '../widgets/loading_overlay.dart';
 
 /// ----------------------
 
@@ -25,25 +28,92 @@ class BUManagerDashboardScreen extends StatefulWidget {
 }
 
 class _BUManagerDashboardScreenState extends State<BUManagerDashboardScreen> {
-  String selectedDateFilter = "All Time";
-
-  String selectedSection = "All Sections";
+  String selectedSection = 'All Sections';
+  DateTimeRange? selectedDateRange;
+  String filterPeriod = 'All Time';
 
   String buCode = '';
-
   String buName = '';
-
-  int _attemptedCount = 0;
-  int _passedCount = 0;
-  int _failedCount = 0;
-  bool _isLoadingCounts = false;
-  bool _countsLoadedForBU = false;
 
   final List<SubmittedAssessment> _firestoreAssessments = [];
   bool _isLoadingAssessments = false;
   bool _assessmentsLoadedForBU = false;
+  final AssessmentService _assessmentService = AssessmentService();
 
-  Future<void> _loadAssessmentsFromFirestore() async {
+  static const Map<String, List<String>> buSectionsMap = {
+    'BUCP': [
+      'Facial Tissue',
+      'Non-Tissue',
+      'Tissue Roll',
+      'PM-09',
+      'FemCare',
+    ],
+    'BUFC': [
+      'Folding & Gluing',
+      'Offset Printing',
+      'Roto Line',
+      'Sorting & Breaking',
+      'FG& paper Cup',
+    ],
+    'BUFP': [
+      'Printing',
+      'Lamination',
+      'Extrusion',
+      'Slitting',
+      'Mechanical Workshop',
+      'Electrical Workshop',
+    ],
+  };
+
+  List<String> get currentSections {
+    final predefined = buSectionsMap[buCode];
+    if (predefined != null) {
+      return ['All Sections', ...predefined];
+    }
+    final fromData = _firestoreAssessments
+        .map((a) => a.section)
+        .whereType<String>()
+        .where((s) => s.isNotEmpty)
+        .toSet()
+        .toList()
+      ..sort();
+    return ['All Sections', ...fromData];
+  }
+
+  bool _matchesDateFilter(DateTime date) {
+    if (selectedDateRange == null) return true;
+    final start = DateTime(
+      selectedDateRange!.start.year,
+      selectedDateRange!.start.month,
+      selectedDateRange!.start.day,
+    );
+    final end = DateTime(
+      selectedDateRange!.end.year,
+      selectedDateRange!.end.month,
+      selectedDateRange!.end.day,
+      23,
+      59,
+      59,
+    );
+    return !date.isBefore(start) && !date.isAfter(end);
+  }
+
+  bool _matchesFilters(SubmittedAssessment assessment) {
+    if (buCode.isNotEmpty && assessment.bu != buCode) return false;
+    if (selectedSection != 'All Sections' &&
+        assessment.section != selectedSection) {
+      return false;
+    }
+    return _matchesDateFilter(assessment.date);
+  }
+
+  List<SubmittedAssessment> _filterAssessments(
+    List<SubmittedAssessment> source,
+  ) {
+    return source.where(_matchesFilters).toList();
+  }
+
+  Future<void> _loadAssessmentsFromBackend() async {
     if (_isLoadingAssessments) return;
     if (buCode.isEmpty) return;
 
@@ -52,31 +122,8 @@ class _BUManagerDashboardScreenState extends State<BUManagerDashboardScreen> {
     });
 
     try {
-      final usersSnapshot = await FirebaseFirestore.instance
-          .collection('company')
-          .doc('main')
-          .collection('users')
-          .get();
-
-      final List<SubmittedAssessment> tempAssessments = [];
-
-      for (final userDoc in usersSnapshot.docs) {
-        final userData = userDoc.data();
-        final assessmentsArray = userData['assessments'];
-        if (assessmentsArray is! List) continue;
-
-        for (final a in assessmentsArray) {
-          if (a is! Map) continue;
-          final aMap = Map<String, dynamic>.from(a);
-          if (aMap['bu']?.toString() != buCode) continue;
-
-          try {
-            tempAssessments.add(SubmittedAssessment.fromJson(aMap));
-          } catch (_) {
-            // Ignore corrupted entries
-          }
-        }
-      }
+      final all = await _assessmentService.getAllAssessments();
+      final tempAssessments = all.where((a) => a.bu == buCode).toList();
 
       if (mounted) {
         setState(() {
@@ -95,72 +142,26 @@ class _BUManagerDashboardScreenState extends State<BUManagerDashboardScreen> {
     }
   }
 
-  Future<void> _loadCountsFromFirestore() async {
-    if (_isLoadingCounts) return;
-    if (buCode.isEmpty) return;
-
-    setState(() {
-      _isLoadingCounts = true;
-    });
-
-    try {
-      final usersSnapshot = await FirebaseFirestore.instance
-          .collection('company')
-          .doc('main')
-          .collection('users')
-          .get();
-
-      int attempted = 0;
-      int passed = 0;
-      int failed = 0;
-
-      for (final userDoc in usersSnapshot.docs) {
-        final userData = userDoc.data();
-        final assessmentsArray = userData['assessments'];
-        if (assessmentsArray is! List) continue;
-
-        for (final a in assessmentsArray) {
-          if (a is! Map) continue;
-          final aMap = Map<String, dynamic>.from(a);
-
-          final bu = aMap['bu']?.toString();
-          if (bu != buCode) continue;
-
-          attempted++;
-
-          final bool isFlagged = aMap['isFlagged'] == true;
-          final bool resolved = aMap['resolved'] == true;
-
-          if (isFlagged && !resolved) {
-            failed++;
-          } else {
-            passed++;
-          }
-        }
-      }
-
-      if (mounted) {
-        setState(() {
-          _attemptedCount = attempted;
-          _passedCount = passed;
-          _failedCount = failed;
-          _countsLoadedForBU = true;
-        });
-      }
-    } finally {
-      if (mounted) {
-        setState(() {
-          _isLoadingCounts = false;
-        });
-      }
-    }
+  Future<void> _goBackToBuSelection(
+    BuildContext context,
+    AppState appState,
+  ) async {
+    // Replacement navigation leaves no stack to pop — always return to BU picker.
+    await SessionService.instance.saveAssessmentContext(
+      auditor: appState.auditorName,
+      auditee: appState.auditeeName,
+      company: appState.selectedCompany,
+      bu: null,
+      section: null,
+      lastRoute: Routes.buSelection,
+    );
+    if (!context.mounted) return;
+    Navigator.pushReplacementNamed(context, Routes.buSelection);
   }
 
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
-
-    // Get BU information from route arguments
 
     final args =
         ModalRoute.of(context)?.settings.arguments as Map<String, String>?;
@@ -168,17 +169,12 @@ class _BUManagerDashboardScreenState extends State<BUManagerDashboardScreen> {
     if (args != null) {
       setState(() {
         buCode = args['buCode'] ?? '';
-
         buName = args['buName'] ?? '';
       });
     }
 
-    if (!_countsLoadedForBU && buCode.isNotEmpty) {
-      _loadCountsFromFirestore();
-    }
-
     if (!_assessmentsLoadedForBU && buCode.isNotEmpty) {
-      _loadAssessmentsFromFirestore();
+      _loadAssessmentsFromBackend();
     }
   }
 
@@ -192,95 +188,45 @@ class _BUManagerDashboardScreenState extends State<BUManagerDashboardScreen> {
     final List<SubmittedAssessment> allAssessments =
         effectiveAssessments.toList().reversed.toList();
 
-    // Filter assessments for the selected BU only
+    final buScoped = buCode.isEmpty
+        ? allAssessments
+        : allAssessments.where((a) => a.bu == buCode).toList();
 
-    final List<SubmittedAssessment> buAllAssessments = allAssessments;
+    final List<SubmittedAssessment> buAllAssessments =
+        _filterAssessments(buScoped);
 
-    final List<SubmittedAssessment> failedAssessments =
-        buAllAssessments.where((a) => a.isFlagged && !a.resolved).toList();
+    final List<SubmittedAssessment> failedAssessments = buAllAssessments
+        .where((a) => a.isFlagged && !a.resolved)
+        .toList();
 
-    // Calculate real BU statistics from actual assessment data
+    final attemptedCount = buAllAssessments.length;
+    final passedCount = buAllAssessments
+        .where((a) => !a.isFlagged || a.resolved)
+        .length;
+    final failedCount = failedAssessments.length;
+    final completionRate = attemptedCount > 0
+        ? ((passedCount / attemptedCount) * 100).round()
+        : 0;
+    final averageScore = attemptedCount == 0
+        ? 0.0
+        : buAllAssessments.map((a) => a.score).reduce((a, b) => a + b) /
+            attemptedCount;
 
-    final Map<String, List<SubmittedAssessment>> buAssessments = {};
-
-    for (final assessment in allAssessments) {
-      final bu = assessment.bu ?? 'Unknown';
-
-      buAssessments.putIfAbsent(bu, () => []).add(assessment);
-    }
-
-    // Update business units with real data
-
-    final List<Map<String, dynamic>> realBusinessUnits = [];
-
-    buAssessments.forEach((bu, assessments) {
-      final passedCount =
-          assessments.where((a) => !a.isFlagged || a.resolved).length;
-
-      final totalCount = assessments.length;
-
-      final completionRate =
-          totalCount > 0 ? ((passedCount / totalCount) * 100).round() : 0;
-
-      final flaggedCount =
-          assessments.where((a) => a.isFlagged && !a.resolved).length;
-
-      realBusinessUnits.add({
-        'shortName': bu,
-
-        'fullName': bu, // Use BU name as full name for now
-
-        'completionRate': completionRate,
-
-        'flagged': flaggedCount,
-
-        'sections': assessments
-            .map((a) => a.section)
-            .where((s) => s != null)
-            .toSet()
-            .toList(),
-
-        'assessments': totalCount,
-      });
-    });
-
-    // Filter to show only the selected BU
-
-    Map<String, dynamic> selectedBUData;
-
-    if (buCode.isNotEmpty && realBusinessUnits.isNotEmpty) {
-      // Try to find the selected BU in real data
-
-      selectedBUData = realBusinessUnits.firstWhere(
-        (bu) => bu['shortName'] == buCode,
-        orElse: () => {
-          // Create empty data for selected BU if no assessments exist yet
-
-          'shortName': buCode,
-
-          'fullName': buName,
-
-          'completionRate': 0,
-
-          'flagged': 0,
-
-          'sections': <String>[],
-
-          'assessments': 0,
-        },
-      );
-    } else {
-      selectedBUData = {
-        'shortName': buCode.isNotEmpty ? buCode : 'BU',
-        'fullName': buName.isNotEmpty
-            ? buName
-            : (buCode.isNotEmpty ? buCode : 'Business Unit'),
-        'completionRate': 0,
-        'flagged': 0,
-        'sections': <String>[],
-        'assessments': 0,
-      };
-    }
+    final selectedBUData = {
+      'shortName': buCode.isNotEmpty ? buCode : 'BU',
+      'fullName': buName.isNotEmpty
+          ? buName
+          : (buCode.isNotEmpty ? buCode : 'Business Unit'),
+      'completionRate': completionRate,
+      'flagged': failedCount,
+      'sections': buAllAssessments
+          .map((a) => a.section)
+          .whereType<String>()
+          .where((s) => s.isNotEmpty)
+          .toSet()
+          .toList(),
+      'assessments': attemptedCount,
+    };
 
     return Scaffold(
       backgroundColor: const Color(0xFFF8FAFC),
@@ -293,9 +239,11 @@ class _BUManagerDashboardScreenState extends State<BUManagerDashboardScreen> {
         foregroundColor: Colors.white,
         elevation: 0,
         centerTitle: true,
+        automaticallyImplyLeading: false,
         leading: IconButton(
           icon: const Icon(Icons.arrow_back),
-          onPressed: () => Navigator.of(context).maybePop(),
+          tooltip: 'Change Business Unit',
+          onPressed: () => _goBackToBuSelection(context, appState),
         ),
         actions: [
           IconButton(
@@ -311,8 +259,49 @@ class _BUManagerDashboardScreenState extends State<BUManagerDashboardScreen> {
       body: SingleChildScrollView(
         padding: const EdgeInsets.all(16),
         child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const SizedBox.shrink(),
+            _buildUnifiedDateFilter(),
+            const SizedBox(height: 12),
+            _buildSectionDropdown(),
+            if (selectedSection != 'All Sections') ...[
+              const SizedBox(height: 12),
+              Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF0891B2).withOpacity(0.1),
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(
+                    color: const Color(0xFF0891B2).withOpacity(0.3),
+                  ),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Icon(Icons.category_outlined,
+                        color: Color(0xFF0891B2), size: 14),
+                    const SizedBox(width: 6),
+                    Text(
+                      'Section: $selectedSection',
+                      style: const TextStyle(
+                        color: Color(0xFF0891B2),
+                        fontSize: 12,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                    const SizedBox(width: 6),
+                    GestureDetector(
+                      onTap: () =>
+                          setState(() => selectedSection = 'All Sections'),
+                      child: const Icon(Icons.close,
+                          size: 14, color: Color(0xFF0891B2)),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+            const SizedBox(height: 16),
 
             /// ----------------- HEADER CARD -----------------
 
@@ -349,7 +338,7 @@ class _BUManagerDashboardScreenState extends State<BUManagerDashboardScreen> {
                   ),
                   const SizedBox(height: 6),
                   Text(
-                    "Filter: $selectedDateFilter",
+                    'Period: $filterPeriod',
                     style: TextStyle(
                       fontSize: 14,
                       color: Colors.white.withOpacity(0.9),
@@ -361,7 +350,81 @@ class _BUManagerDashboardScreenState extends State<BUManagerDashboardScreen> {
 
             const SizedBox(height: 24),
 
-            const SizedBox.shrink(),
+            /// ----------------- SCORE CARD (selected BU) -----------------
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(24),
+              decoration: BoxDecoration(
+                gradient: const LinearGradient(
+                  colors: [Color(0xFF0891B2), Color(0xFF0EA5E9)],
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                ),
+                borderRadius: BorderRadius.circular(16),
+                boxShadow: [
+                  BoxShadow(
+                    color: const Color(0xFF0891B2).withOpacity(0.3),
+                    blurRadius: 15,
+                    offset: const Offset(0, 5),
+                  ),
+                ],
+              ),
+              child: Column(
+                children: [
+                  Text(
+                    '${buCode.isNotEmpty ? buCode : 'BU'} Overall Score',
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 20,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                  if (selectedSection != 'All Sections') ...[
+                    const SizedBox(height: 6),
+                    Text(
+                      'Section: $selectedSection',
+                      style: TextStyle(
+                        color: Colors.white.withOpacity(0.9),
+                        fontSize: 13,
+                      ),
+                    ),
+                  ],
+                  const SizedBox(height: 16),
+                  Text(
+                    _isLoadingAssessments && !_assessmentsLoadedForBU
+                        ? '...'
+                        : '${averageScore.toStringAsFixed(0)}%',
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 48,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    'Period: $filterPeriod',
+                    style: const TextStyle(
+                      color: Colors.white70,
+                      fontSize: 14,
+                    ),
+                  ),
+                  if (!_isLoadingAssessments || _assessmentsLoadedForBU) ...[
+                    const SizedBox(height: 8),
+                    Text(
+                      attemptedCount == 0
+                          ? 'No assessments in this filter'
+                          : 'Based on $attemptedCount assessment${attemptedCount == 1 ? '' : 's'}',
+                      style: TextStyle(
+                        color: Colors.white.withOpacity(0.85),
+                        fontSize: 12,
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+
+            const SizedBox(height: 24),
 
             Align(
               alignment: Alignment.centerLeft,
@@ -389,7 +452,7 @@ class _BUManagerDashboardScreenState extends State<BUManagerDashboardScreen> {
                         const Icon(Icons.analytics, color: Color(0xFF0891B2)),
                         const SizedBox(width: 8),
                         Text(
-                          selectedBUData['fullName'],
+                          selectedBUData['fullName'] as String,
                           style: const TextStyle(
                             fontSize: 16,
                             fontWeight: FontWeight.bold,
@@ -402,11 +465,11 @@ class _BUManagerDashboardScreenState extends State<BUManagerDashboardScreen> {
                       mainAxisAlignment: MainAxisAlignment.spaceBetween,
                       children: [
                         _metricTile('Attempted',
-                            _isLoadingCounts ? '...' : '$_attemptedCount'),
+                            _isLoadingAssessments ? '...' : '$attemptedCount'),
                         _metricTile('Passed',
-                            _isLoadingCounts ? '...' : '$_passedCount'),
+                            _isLoadingAssessments ? '...' : '$passedCount'),
                         _metricTile('Failed',
-                            _isLoadingCounts ? '...' : '$_failedCount'),
+                            _isLoadingAssessments ? '...' : '$failedCount'),
                       ],
                     ),
                     const SizedBox(height: 12),
@@ -443,7 +506,9 @@ class _BUManagerDashboardScreenState extends State<BUManagerDashboardScreen> {
             const SizedBox(height: 12),
 
             if (_isLoadingAssessments && !_assessmentsLoadedForBU)
-              const Center(child: CircularProgressIndicator())
+              const Center(
+                child: LoadingPanel(message: 'Loading assessments...'),
+              )
             else if (buAllAssessments.isEmpty)
               Container(
                 padding: const EdgeInsets.all(16),
@@ -607,7 +672,9 @@ class _BUManagerDashboardScreenState extends State<BUManagerDashboardScreen> {
             const SizedBox(height: 12),
 
             if (_isLoadingAssessments && !_assessmentsLoadedForBU)
-              const Center(child: CircularProgressIndicator())
+              const Center(
+                child: LoadingPanel(message: 'Loading assessments...'),
+              )
             else if (failedAssessments.isEmpty)
               Text(
                 buCode.isNotEmpty
@@ -688,6 +755,7 @@ class _BUManagerDashboardScreenState extends State<BUManagerDashboardScreen> {
           ],
         ),
       ),
+      bottomNavigationBar: const RoleBottomNav(current: RoleSection.buDashboard),
     );
   }
 
@@ -708,46 +776,249 @@ class _BUManagerDashboardScreenState extends State<BUManagerDashboardScreen> {
     );
   }
 
-  Widget _buildDateFilter(BuildContext context) {
-    return DropdownButton<String>(
-      value: selectedDateFilter,
-      items: ["All Time", "Last 7 Days", "Last 30 Days", "Custom"]
-          .map((filter) => DropdownMenuItem(value: filter, child: Text(filter)))
-          .toList(),
-      onChanged: (val) {
-        if (val != null) {
-          setState(() => selectedDateFilter = val);
-        }
-      },
+  void _onSectionChanged(String? newValue) {
+    if (newValue == null) return;
+    setState(() => selectedSection = newValue);
+  }
+
+  Widget _buildSectionDropdown() {
+    final sections = currentSections;
+    final value =
+        sections.contains(selectedSection) ? selectedSection : 'All Sections';
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(12),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.05),
+            blurRadius: 10,
+            offset: const Offset(0, 4),
+          ),
+        ],
+      ),
+      child: Row(
+        children: [
+          const Icon(Icons.category_outlined, color: Color(0xFF0891B2)),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              buCode.isNotEmpty ? '$buCode Section' : 'Section',
+              style: const TextStyle(
+                fontWeight: FontWeight.w600,
+                color: Color(0xFF0F172A),
+              ),
+            ),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            flex: 2,
+            child: DropdownButtonHideUnderline(
+              child: DropdownButton<String>(
+                value: value,
+                isExpanded: true,
+                items: sections
+                    .map((s) => DropdownMenuItem(value: s, child: Text(s)))
+                    .toList(),
+                onChanged: _onSectionChanged,
+              ),
+            ),
+          ),
+        ],
+      ),
     );
   }
 
-  Widget _buildSectionFilter(BuildContext context) {
-    final appState = Provider.of<AppState>(context, listen: false);
-    final allSectionsFromData = appState.assessments
-        .where((a) => buCode.isEmpty || (a.bu ?? '') == buCode)
-        .map((a) => a.section)
-        .whereType<String>()
-        .where((s) => s.isNotEmpty)
-        .toSet()
-        .toList();
+  Widget _buildUnifiedDateFilter() {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(12),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.05),
+            blurRadius: 10,
+            offset: const Offset(0, 4),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Row(
+            children: [
+              Icon(Icons.filter_list, color: Color(0xFF0891B2)),
+              SizedBox(width: 8),
+              Text(
+                'Filter by Date',
+                style: TextStyle(
+                  fontSize: 16,
+                  fontWeight: FontWeight.w600,
+                  color: Color(0xFF0F172A),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          Wrap(
+            spacing: 12,
+            runSpacing: 8,
+            children: [
+              _chip('All Time', () {
+                setState(() {
+                  selectedDateRange = null;
+                  filterPeriod = 'All Time';
+                });
+              }, isSelected: filterPeriod == 'All Time'),
+              _chip('Last 7 Days', () {
+                setState(() {
+                  selectedDateRange = DateTimeRange(
+                    start: DateTime.now().subtract(const Duration(days: 7)),
+                    end: DateTime.now(),
+                  );
+                  filterPeriod = 'Last 7 Days';
+                });
+              }, isSelected: filterPeriod == 'Last 7 Days'),
+              _chip('Last 30 Days', () {
+                setState(() {
+                  selectedDateRange = DateTimeRange(
+                    start: DateTime.now().subtract(const Duration(days: 30)),
+                    end: DateTime.now(),
+                  );
+                  filterPeriod = 'Last 30 Days';
+                });
+              }, isSelected: filterPeriod == 'Last 30 Days'),
+              _customRangeChip(),
+            ],
+          ),
+          if (selectedDateRange != null) ...[
+            const SizedBox(height: 12),
+            Row(
+              children: [
+                const Icon(Icons.date_range,
+                    size: 16, color: Color(0xFF0891B2)),
+                const SizedBox(width: 8),
+                Text(
+                  '${selectedDateRange!.start.day}/${selectedDateRange!.start.month}/${selectedDateRange!.start.year} - '
+                  '${selectedDateRange!.end.day}/${selectedDateRange!.end.month}/${selectedDateRange!.end.year}',
+                  style: const TextStyle(
+                    color: Color(0xFF0891B2),
+                    fontSize: 12,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+                const SizedBox(width: 8),
+                GestureDetector(
+                  onTap: () {
+                    setState(() {
+                      selectedDateRange = null;
+                      filterPeriod = 'All Time';
+                    });
+                  },
+                  child: const Icon(Icons.close,
+                      size: 16, color: Color(0xFF0891B2)),
+                ),
+              ],
+            ),
+          ],
+        ],
+      ),
+    );
+  }
 
-    List<String> allSections = [
-      "All Sections",
-      ...allSectionsFromData,
-    ];
+  Widget _chip(String label, VoidCallback onTap, {bool isSelected = false}) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+        decoration: BoxDecoration(
+          color: isSelected ? const Color(0xFF0891B2) : Colors.transparent,
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(
+            color: isSelected
+                ? const Color(0xFF0891B2)
+                : const Color(0xFFE2E8F0),
+          ),
+        ),
+        child: Text(
+          label,
+          style: TextStyle(
+            color: isSelected ? Colors.white : const Color(0xFF64748B),
+            fontSize: 12,
+            fontWeight: FontWeight.w500,
+          ),
+        ),
+      ),
+    );
+  }
 
-    return DropdownButton<String>(
-      value: selectedSection,
-      items: allSections
-          .map((section) =>
-              DropdownMenuItem(value: section, child: Text(section)))
-          .toList(),
-      onChanged: (val) {
-        if (val != null) {
-          setState(() => selectedSection = val);
+  Widget _customRangeChip() {
+    final isSelected = filterPeriod == 'Custom Range';
+
+    return GestureDetector(
+      onTap: () async {
+        final now = DateTime.now();
+        final initialStartDate =
+            selectedDateRange?.start ?? now.subtract(const Duration(days: 30));
+        final initialEndDate = selectedDateRange?.end ?? now;
+
+        final DateTimeRange? picked = await showDateRangePicker(
+          context: context,
+          firstDate: DateTime(2020),
+          lastDate: now,
+          initialDateRange: DateTimeRange(
+            start: initialStartDate,
+            end: initialEndDate,
+          ),
+          builder: (context, child) {
+            return Theme(
+              data: Theme.of(context).copyWith(
+                colorScheme: const ColorScheme.light(
+                  primary: Color(0xFF0891B2),
+                  onPrimary: Colors.white,
+                  surface: Colors.white,
+                  onSurface: Color(0xFF0F172A),
+                ),
+                textButtonTheme: TextButtonThemeData(
+                  style: TextButton.styleFrom(
+                    foregroundColor: const Color(0xFF0891B2),
+                  ),
+                ),
+              ),
+              child: child!,
+            );
+          },
+        );
+
+        if (picked != null) {
+          setState(() {
+            selectedDateRange = picked;
+            filterPeriod = 'Custom Range';
+          });
         }
       },
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+        decoration: BoxDecoration(
+          color: isSelected ? const Color(0xFF0891B2) : Colors.transparent,
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(
+            color:
+                isSelected ? const Color(0xFF0891B2) : const Color(0xFFE2E8F0),
+          ),
+        ),
+        child: Text(
+          'Custom Range',
+          style: TextStyle(
+            color: isSelected ? Colors.white : const Color(0xFF64748B),
+            fontSize: 12,
+            fontWeight: FontWeight.w500,
+          ),
+        ),
+      ),
     );
   }
 

@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
-import 'dart:async';
+import 'package:flutter_svg/flutter_svg.dart';
+
 import '../../routes.dart';
+import '../widgets/packages_branded_shell.dart';
 
 class SplashScreen extends StatefulWidget {
   const SplashScreen({super.key});
@@ -18,38 +20,28 @@ class _SplashScreenState extends State<SplashScreen>
   @override
   void initState() {
     super.initState();
-    
-    // Initialize animations
+
     _animationController = AnimationController(
       duration: const Duration(seconds: 2),
       vsync: this,
     );
-    
-    _fadeAnimation = Tween<double>(
-      begin: 0.0,
-      end: 1.0,
-    ).animate(CurvedAnimation(
-      parent: _animationController,
-      curve: Curves.easeInOut,
-    ));
-    
-    _scaleAnimation = Tween<double>(
-      begin: 0.8,
-      end: 1.0,
-    ).animate(CurvedAnimation(
-      parent: _animationController,
-      curve: Curves.elasticOut,
-    ));
-    
-    // Start animations
+
+    _fadeAnimation = Tween<double>(begin: 0.0, end: 1.0).animate(
+      CurvedAnimation(parent: _animationController, curve: Curves.easeInOut),
+    );
+
+    _scaleAnimation = Tween<double>(begin: 0.8, end: 1.0).animate(
+      CurvedAnimation(parent: _animationController, curve: Curves.elasticOut),
+    );
+
     _animationController.forward();
-    
-    // Navigate to login after 7 seconds
-    Timer(const Duration(seconds: 7), () {
-      if (mounted) {
-        Navigator.of(context).pushReplacementNamed(Routes.login);
-      }
-    });
+    _bootstrap();
+  }
+
+  Future<void> _bootstrap() async {
+    await Future<void>.delayed(const Duration(seconds: 2));
+    if (!mounted) return;
+    Navigator.of(context).pushReplacementNamed(Routes.appChooser);
   }
 
   @override
@@ -60,112 +52,67 @@ class _SplashScreenState extends State<SplashScreen>
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      body: Container(
-        decoration: const BoxDecoration(
-          gradient: LinearGradient(
-            begin: Alignment.topCenter,
-            end: Alignment.bottomCenter,
-            colors: [
-              Color(0xFF0891B2), // Primary cyan-600
-              Color(0xFF0E7490), // Darker cyan-700
-            ],
-          ),
-        ),
-        child: Center(
-          child: AnimatedBuilder(
-            animation: _animationController,
-            builder: (context, child) {
-              return FadeTransition(
-                opacity: _fadeAnimation,
-                child: ScaleTransition(
-                  scale: _scaleAnimation,
-                  child: Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      // App Logo/Icon
-                      Container(
-                        width: 120,
-                        height: 120,
-                        decoration: BoxDecoration(
-                          color: Colors.white,
-                          borderRadius: BorderRadius.circular(24),
-                          boxShadow: [
-                            BoxShadow(
-                              color: Colors.black.withOpacity(0.2),
-                              blurRadius: 20,
-                              offset: const Offset(0, 10),
-                            ),
-                          ],
-                        ),
-                        child: ClipRRect(
-                          borderRadius: BorderRadius.circular(24),
-                          child: Image.asset(
-                            'assets/images/splash_logo.png',
-                            width: 120,
-                            height: 120,
-                            fit: BoxFit.cover,
-                            errorBuilder: (context, error, stackTrace) {
-                              // Fallback to icon if image not found
-                              return const Icon(
-                                Icons.assessment_outlined,
-                                size: 60,
-                                color: Color(0xFF0891B2),
-                              );
-                            },
-                          ),
-                        ),
+    return PackagesBrandedShell(
+      watermarkOpacity: 0.1,
+      padding: const EdgeInsets.all(32),
+      child: Center(
+        child: AnimatedBuilder(
+          animation: _animationController,
+          builder: (context, child) {
+            return FadeTransition(
+              opacity: _fadeAnimation,
+              child: ScaleTransition(
+                scale: _scaleAnimation,
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    SvgPicture.asset(
+                      PackagesBrandedShell.logoAsset,
+                      width: 88,
+                      height: 88,
+                    ),
+                    const SizedBox(height: 28),
+                    const Text(
+                      'Packages Group',
+                      style: TextStyle(
+                        fontSize: 32,
+                        fontWeight: FontWeight.bold,
+                        color: Colors.white,
+                        letterSpacing: 0.6,
                       ),
-                      const SizedBox(height: 32),
-                      
-                      // App Title
-                      const Text(
-                        '5S Digital',
-                        style: TextStyle(
-                          fontSize: 32,
-                          fontWeight: FontWeight.bold,
-                          color: Colors.white,
-                          letterSpacing: 1.2,
-                        ),
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      'Workplace digital solutions',
+                      style: TextStyle(
+                        fontSize: 16,
+                        color: Colors.white.withOpacity(0.78),
+                        fontWeight: FontWeight.w400,
                       ),
-                      const SizedBox(height: 8),
-                      const Text(
-                        'Assessment',
-                        style: TextStyle(
-                          fontSize: 24,
-                          fontWeight: FontWeight.w300,
-                          color: Colors.white70,
-                          letterSpacing: 0.8,
-                        ),
+                    ),
+                    const SizedBox(height: 40),
+                    const Text(
+                      '5S Assessment  ·  Digital Gemba',
+                      style: TextStyle(
+                        fontSize: 15,
+                        color: Colors.white70,
+                        fontWeight: FontWeight.w500,
                       ),
-                      const SizedBox(height: 48),
-                      
-                      // Subtitle
-                      const Text(
-                        'Workplace Organization & Efficiency',
-                        style: TextStyle(
-                          fontSize: 16,
-                          color: Colors.white70,
-                          fontWeight: FontWeight.w400,
-                        ),
+                    ),
+                    const SizedBox(height: 56),
+                    const SizedBox(
+                      width: 36,
+                      height: 36,
+                      child: CircularProgressIndicator(
+                        valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+                        strokeWidth: 2.5,
                       ),
-                      const SizedBox(height: 80),
-                      
-                      // Loading indicator
-                      const SizedBox(
-                        width: 40,
-                        height: 40,
-                        child: CircularProgressIndicator(
-                          valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
-                          strokeWidth: 3,
-                        ),
-                      ),
-                    ],
-                  ),
+                    ),
+                  ],
                 ),
-              );
-            },
-          ),
+              ),
+            );
+          },
         ),
       ),
     );

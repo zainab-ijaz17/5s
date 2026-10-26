@@ -1,60 +1,69 @@
 import 'package:flutter/material.dart';
-import 'package:provider/provider.dart';
-import '../state/app_state.dart';
-import '../services/email_service.dart';
 
+import 'api_service.dart';
+
+/// Triggers server-side follow-up email sweep (replaces device SMTP).
 class FollowUpService {
-  static const Duration _checkInterval = Duration(hours: 1); // Check every hour
-
-  static void startFollowUpScheduler(BuildContext context) {
-    // Check for follow-ups immediately and then periodically
-    _checkAndSendFollowUps(context);
-
-    // Set up periodic checking (this would typically be done in a background service)
-    // For now, we'll check when the app comes to foreground
-    WidgetsBinding.instance.addObserver(_LifecycleObserver(context));
-  }
-
-  static Future<void> _checkAndSendFollowUps(BuildContext context) async {
-    try {
-      final appState = Provider.of<AppState>(context, listen: false);
-      final emailService = EmailService();
-
-      await appState.sweepFollowUps(emailService);
-
-      print('Follow-up check completed');
-    } catch (e) {
-      print('Error during follow-up check: $e');
+  static Future<Map<String, dynamic>> sweepFromServer() async {
+    final token = await ApiService.getAccessToken();
+    if (token == null || token.isEmpty) {
+      throw Exception('Sign in again to run follow-up emails');
     }
+
+    final response = await ApiService.post(
+      '/assessments/follow-ups/sweep',
+      const {},
+      accessToken: token,
+    );
+
+    if (response is Map) {
+      return Map<String, dynamic>.from(response);
+    }
+    return const {};
   }
 
   static Future<void> triggerManualFollowUpCheck(BuildContext context) async {
-    await _checkAndSendFollowUps(context);
-
-    if (context.mounted) {
+    try {
+      if (!context.mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text('Follow-up email check completed'),
-          backgroundColor: Color(0xFF10B981),
+          content: Text('Running follow-up email sweep on server...'),
+          backgroundColor: Color(0xFF0891B2),
           duration: Duration(seconds: 2),
         ),
       );
-    }
-  }
-}
 
-class _LifecycleObserver extends WidgetsBindingObserver {
-  final BuildContext context;
+      final result = await sweepFromServer();
+      if (!context.mounted) return;
 
-  _LifecycleObserver(this.context);
+      final processed = result['processed'];
+      final sent = result['sent'];
+      final errors = result['errors'];
+      final errorCount = errors is List ? errors.length : 0;
 
-  @override
-  void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed) {
-      // Check for follow-ups when app comes to foreground
-      Future.delayed(const Duration(seconds: 2), () {
-        FollowUpService._checkAndSendFollowUps(context);
-      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            'Follow-up sweep complete: ${sent ?? 0} sent'
+            '${processed != null ? ' of $processed due' : ''}'
+            '${errorCount > 0 ? ' ($errorCount failed)' : ''}.',
+          ),
+          backgroundColor:
+              errorCount > 0 ? const Color(0xFFF59E0B) : const Color(0xFF10B981),
+          duration: Duration(seconds: errorCount > 0 ? 6 : 3),
+        ),
+      );
+    } catch (e) {
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            e.toString().replaceFirst('Exception: ', ''),
+          ),
+          backgroundColor: const Color(0xFFEF4444),
+          duration: const Duration(seconds: 5),
+        ),
+      );
     }
   }
 }

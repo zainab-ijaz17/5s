@@ -1,8 +1,6 @@
 import 'dart:async';
-import 'package:provider/provider.dart';
-import 'package:flutter/material.dart';
 import '../models/submitted_assessment.dart';
-import '../state/app_state.dart';
+import 'api_service.dart';
 
 class AssessmentService {
   // Singleton pattern
@@ -10,31 +8,39 @@ class AssessmentService {
   factory AssessmentService() => _instance;
   AssessmentService._internal();
 
-  // Get all passed assessments from AppState
-  Future<List<SubmittedAssessment>> getPassedAssessments(
-      BuildContext context) async {
-    // Get AppState using the provided context
-    final appState = Provider.of<AppState>(context, listen: false);
-
-    // Filter for passed assessments (score >= 90)
-    final passedAssessments = appState.assessments
-        .where((assessment) => assessment.score >= 90)
+  Future<List<SubmittedAssessment>> getAllAssessments() async {
+    final response = await ApiService.get('/assessments');
+    final list = response is List ? response : <dynamic>[];
+    return list
+        .whereType<Map>()
+        .map((m) => SubmittedAssessment.fromJson(Map<String, dynamic>.from(m)))
         .toList();
-
-    return passedAssessments;
   }
 
-  // Get passed assessments for a specific BU
-  Future<List<SubmittedAssessment>> getPassedAssessmentsByBU(
-      BuildContext context, String bu) async {
-    final assessments = await getPassedAssessments(context);
-    return assessments.where((a) => a.bu == bu).toList();
+  Future<SubmittedAssessment?> getAssessmentById(String id) async {
+    if (id.isEmpty) return null;
+    try {
+      final response = await ApiService.get('/assessments/$id');
+      if (response is! Map) return null;
+      final map = Map<String, dynamic>.from(response);
+      final responseId = map['id']?.toString();
+      if (responseId == null || responseId.isEmpty || responseId != id) {
+        return null;
+      }
+      return SubmittedAssessment.fromJson(map);
+    } catch (_) {
+      return null;
+    }
   }
 
-  // Get passed assessments for a specific section
-  Future<List<SubmittedAssessment>> getPassedAssessmentsBySection(
-      BuildContext context, String section) async {
-    final assessments = await getPassedAssessments(context);
-    return assessments.where((a) => a.section == section).toList();
+  Future<bool> existsOnServer(String id) async {
+    if (id.isEmpty) return false;
+    final found = await getAssessmentById(id);
+    return found != null;
+  }
+
+  Future<List<SubmittedAssessment>> getPassedAssessments() async {
+    final assessments = await getAllAssessments();
+    return assessments.where((assessment) => assessment.score >= 90).toList();
   }
 }

@@ -1,14 +1,18 @@
 import 'package:flutter/material.dart';
+import 'dart:async';
 import 'dart:io';
 import '../widgets/question_card.dart';
 import 'package:provider/provider.dart';
 import '../state/app_state.dart';
 import '../models/submitted_assessment.dart';
-import '../services/email_service.dart';
-import '../services/user_service.dart';
+import '../models/assessment_draft.dart';
+import '../services/connectivity_service.dart';
 import '../services/question_service.dart';
-import 'package:firebase_auth/firebase_auth.dart';
-import 'package:firebase_storage/firebase_storage.dart';
+import '../services/sync_service.dart';
+import '../services/assessment_draft_service.dart';
+import '../navigation/role_navigation.dart';
+import '../services/session_service.dart';
+import '../widgets/loading_overlay.dart';
 
 class AssessmentScreen extends StatefulWidget {
   const AssessmentScreen({super.key});
@@ -17,7 +21,8 @@ class AssessmentScreen extends StatefulWidget {
   State<AssessmentScreen> createState() => _AssessmentScreenState();
 }
 
-class _AssessmentScreenState extends State<AssessmentScreen> {
+class _AssessmentScreenState extends State<AssessmentScreen>
+    with WidgetsBindingObserver {
   final Map<int, String> _answers = {};
   final Map<int, List<File>> _questionImages = {};
   final Map<int, String> _questionComments = {};
@@ -25,79 +30,167 @@ class _AssessmentScreenState extends State<AssessmentScreen> {
   final QuestionService _questionService = QuestionService();
   List<Map<String, dynamic>> questions = [];
   bool isLoading = true;
-
-  Future<List<String>> _uploadImagesToStorage(
-      String assessmentId, int questionIndex, List<File> files) async {
-    final storage = FirebaseStorage.instance;
-    final List<String> urls = [];
-
-    for (final file in files) {
-      try {
-        final exists = await file.exists();
-        if (!exists) {
-          throw Exception('Selected image no longer exists on device.');
-        }
-
-        final fileName = file.path.split(Platform.pathSeparator).last;
-        final ref = storage
-            .ref()
-            .child('assessments')
-            .child(assessmentId)
-            .child('q${questionIndex + 1}')
-            .child(fileName);
-
-        await ref.putFile(
-          file,
-          SettableMetadata(contentType: 'image/jpeg'),
-        );
-
-        // In some environments, download URL generation may briefly lag behind upload.
-        String? url;
-        Object? lastError;
-        for (int attempt = 0; attempt < 3; attempt++) {
-          try {
-            url = await ref.getDownloadURL();
-            break;
-          } catch (e) {
-            lastError = e;
-            if (attempt < 2) {
-              await Future.delayed(
-                Duration(milliseconds: 500 * (attempt + 1)),
-              );
-            }
-          }
-        }
-
-        if (url == null || url.isEmpty) {
-          throw Exception(
-            'Upload completed but download URL was not available. ${lastError ?? ''}',
-          );
-        }
-
-        urls.add(url);
-      } catch (e) {
-        throw Exception(
-          'Image upload failed for Question ${questionIndex + 1} (${file.path}): $e',
-        );
-      }
-    }
-
-    return urls;
-  }
+  bool _isSubmitting = false;
+  String? _submitStatusMessage;
+  bool _resumeDraft = false;
+  bool _draftLoaded = false;
+  String? _draftId;
+  DateTime? _draftStartedAt;
+  /// Cached in [didChangeDependencies] so dispose/lifecycle can save without
+  /// looking up Provider ancestors on a deactivated element.
+  AppState? _appState;
 
   @override
   void initState() {
     super.initState();
-    print(
-        'AssessmentScreen initState - questions list initialized with ${questions.length} items');
+    WidgetsBinding.instance.addObserver(this);
+    AssessmentDraftService.instance.setAssessmentScreenOpen(true);
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    AssessmentDraftService.instance.setAssessmentScreenOpen(false);
+    if (_editing == null && !_isSubmitting) {
+      unawaited(_persistDraft());
+    }
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (_editing != null) return;
+    if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.detached) {
+      unawaited(_persistDraft());
+    }
   }
 
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
-    print('AssessmentScreen didChangeDependencies called');
+    _appState = Provider.of<AppState>(context, listen: false);
+    final args =
+        ModalRoute.of(context)?.settings.arguments as Map<String, dynamic>?;
+    _resumeDraft = args?['resumeDraft'] == true;
     _loadQuestions();
     _loadAssessmentData();
+  }
+
+  Future<void> _persistDraft() async {
+    if (_editing != null || _isSubmitting) return;
+    if (questions.isEmpty) return;
+
+    final appState = _appState;
+    if (appState == null) return;
+
+    final draftId = _draftId ?? DateTime.now().millisecondsSinceEpoch.toString();
+    _draftId = draftId;
+    _draftStartedAt ??= DateTime.now();
+
+    // Copy camera/gallery temp files into durable app storage so photos
+    // still exist after the app is killed and the draft is continued.
+    final durablePaths = await AssessmentDraftService.instance.persistImageFiles(
+      draftId: draftId,
+      imageFiles: Map<int, List<File>>.from(_questionImages),
+    );
+
+    // Point in-memory state at durable files for the rest of this session.
+    _questionImages
+      ..clear()
+      ..addAll(
+        durablePaths.map(
+          (index, paths) => MapEntry(
+            index,
+            paths.map(File.new).toList(),
+          ),
+        ),
+      );
+
+    final draft = AssessmentDraft(
+      id: draftId,
+      userId: appState.currentUser?.id,
+      employeeId: appState.currentUser?.employeeId,
+      company: appState.selectedCompany ?? 'Unknown',
+      bu: appState.selectedBU,
+      section: appState.selectedSection,
+      auditorName: appState.auditorName,
+      auditeeName: appState.auditeeName,
+      startedAt: _draftStartedAt ?? DateTime.now(),
+      updatedAt: DateTime.now(),
+      totalQuestions: questions.length,
+      answers: Map<int, String>.from(_answers),
+      comments: Map<int, String>.from(_questionComments),
+      imagePaths: durablePaths,
+    );
+
+    await AssessmentDraftService.instance.saveDraft(draft);
+  }
+
+  Future<void> _restoreDraftIfNeeded() async {
+    if (_editing != null || _draftLoaded || !_resumeDraft || !mounted) return;
+
+    final appState = Provider.of<AppState>(context, listen: false);
+    final draft = await AssessmentDraftService.instance.loadDraft(
+      userId: appState.currentUser?.id,
+      employeeId: appState.currentUser?.employeeId,
+    );
+    if (draft == null || !mounted) {
+      _draftLoaded = true;
+      return;
+    }
+
+    if (draft.totalQuestions > 0 && draft.totalQuestions != questions.length) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'Question list changed since your draft was saved. Starting fresh.',
+            ),
+            backgroundColor: Color(0xFFF59E0B),
+          ),
+        );
+      }
+      await AssessmentDraftService.instance.clearDraft();
+      _draftLoaded = true;
+      return;
+    }
+
+    _draftId = draft.id;
+    _draftStartedAt = draft.startedAt;
+
+    if (draft.company.isNotEmpty) appState.selectCompany(draft.company);
+    if (draft.bu != null && draft.bu!.isNotEmpty) appState.selectBU(draft.bu!);
+    appState.selectSection(draft.section);
+    final user = appState.currentUser;
+    if (user != null &&
+        draft.auditorName != null &&
+        draft.auditeeName != null) {
+      appState.setLogin(
+        user,
+        auditor: draft.auditorName,
+        auditee: draft.auditeeName,
+      );
+    }
+
+    _answers
+      ..clear()
+      ..addAll(draft.answers);
+    _questionComments
+      ..clear()
+      ..addAll(draft.comments);
+    _questionImages.clear();
+    draft.imagePaths.forEach((index, paths) {
+      final files = paths
+          .where((p) => p.isNotEmpty)
+          .map((p) => File(p))
+          .where((f) => f.existsSync())
+          .toList();
+      if (files.isNotEmpty) _questionImages[index] = files;
+    });
+
+    _draftLoaded = true;
+    if (mounted) setState(() {});
   }
 
   Future<void> _loadQuestions() async {
@@ -110,6 +203,7 @@ class _AssessmentScreenState extends State<AssessmentScreen> {
           questions = loadedQuestions;
           isLoading = false;
         });
+        await _restoreDraftIfNeeded();
       }
     } catch (e) {
       print('Error loading questions: $e');
@@ -167,10 +261,24 @@ class _AssessmentScreenState extends State<AssessmentScreen> {
 
   @override
   Widget build(BuildContext context) {
-    print(
-        'AssessmentScreen build called - questions.length: ${questions.length}, isLoading: $isLoading');
+    final syncProgress =
+        _isSubmitting ? context.watch<AppState>().syncProgress : null;
+    final loadingMessage = syncProgress ??
+        _submitStatusMessage ??
+        (_editing != null ? 'Updating assessment...' : 'Saving assessment...');
 
-    return Scaffold(
+    return PopScope(
+      canPop: !_isSubmitting,
+      onPopInvokedWithResult: (didPop, result) {
+        if (didPop && _editing == null) {
+          unawaited(_persistDraft());
+        }
+      },
+      child: LoadingOverlay(
+      isLoading: _isSubmitting,
+      message: loadingMessage,
+      variant: LoadingPanelVariant.submit,
+      child: Scaffold(
       appBar: AppBar(
         title: Text(
           _editing != null ? 'Edit Assessment' : 'Assessment',
@@ -210,7 +318,9 @@ class _AssessmentScreenState extends State<AssessmentScreen> {
       ),
       backgroundColor: const Color(0xFFF9FAFB),
       body: isLoading
-          ? const Center(child: CircularProgressIndicator())
+          ? const Center(
+              child: LoadingPanel(message: 'Loading questions...'),
+            )
           : questions.isEmpty
               ? Center(
                   child: Column(
@@ -323,6 +433,10 @@ class _AssessmentScreenState extends State<AssessmentScreen> {
                         itemBuilder: (context, index) {
                           final questionData = questions[index];
                           return QuestionCard(
+                            key: ValueKey(
+                              'q_${index}_${_answers[index]}_'
+                              '${_questionImages[index]?.map((f) => f.path).join('|') ?? ''}',
+                            ),
                             question: questionData['question'] as String,
                             questionDetails:
                                 questionData['details'] as String? ?? '',
@@ -331,21 +445,28 @@ class _AssessmentScreenState extends State<AssessmentScreen> {
                               setState(() {
                                 _answers[index] = answer;
                               });
+                              unawaited(_persistDraft());
                             },
                             onImagesSelected: (images) {
                               setState(() {
                                 _questionImages[index] = images;
                               });
+                              // Persist immediately so temp picker files are
+                              // copied before iOS/Android can delete them.
+                              unawaited(() async {
+                                await _persistDraft();
+                                if (mounted) setState(() {});
+                              }());
                             },
                             onCommentChanged: (comment) {
                               _questionComments[index] = comment;
+                              unawaited(_persistDraft());
                             },
                             initialAnswer: _answers[index],
                             initialComment: _questionComments[index],
-                            initialImagePath:
-                                _questionImages[index]?.isNotEmpty == true
-                                    ? _questionImages[index]!.first.path
-                                    : null,
+                            initialImagePaths: _questionImages[index]
+                                ?.map((img) => img.path)
+                                .toList(),
                           );
                         },
                       ),
@@ -353,25 +474,94 @@ class _AssessmentScreenState extends State<AssessmentScreen> {
                   ],
                 ),
       floatingActionButton: FloatingActionButton.extended(
-        onPressed: _answers.length == questions.length && !isLoading
+        onPressed: _answers.length == questions.length &&
+                !isLoading &&
+                !_isSubmitting
             ? () {
                 _submitAssessment();
               }
             : null,
-        backgroundColor: _answers.length == questions.length && !isLoading
+        backgroundColor: _answers.length == questions.length &&
+                !isLoading &&
+                !_isSubmitting
             ? const Color(0xFF0891B2)
             : const Color(0xFF9CA3AF),
-        icon: const Icon(Icons.send),
-        label: Text(_answers.length == questions.length && !isLoading
-            ? (_editing != null ? 'Update Assessment' : 'Submit Assessment')
-            : 'Answer All Questions'),
+        icon: _isSubmitting
+            ? const SizedBox(
+                width: 20,
+                height: 20,
+                child: CircularProgressIndicator(
+                  strokeWidth: 2,
+                  color: Colors.white,
+                ),
+              )
+            : const Icon(Icons.send),
+        label: Text(
+          _isSubmitting
+              ? 'Submitting...'
+              : _answers.length == questions.length && !isLoading
+                  ? (_editing != null ? 'Update Assessment' : 'Submit Assessment')
+                  : 'Answer All Questions',
+        ),
       ),
+    ),
+    ),
     );
   }
 
   Future<void> _submitAssessment() async {
+    if (_isSubmitting) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Still submitting, please wait...'),
+            duration: Duration(seconds: 2),
+          ),
+        );
+      }
+      return;
+    }
+
+    setState(() {
+      _isSubmitting = true;
+      _submitStatusMessage =
+          _editing != null ? 'Updating assessment...' : 'Saving assessment...';
+    });
     try {
       final appState = Provider.of<AppState>(context, listen: false);
+
+      if (!await RoleNavigation.ensureAuditorAuditee(context)) {
+        return;
+      }
+
+      final auditorName = appState.auditorName?.trim() ?? '';
+      final auditeeName = appState.auditeeName?.trim() ?? '';
+      final company = appState.selectedCompany?.trim() ?? '';
+      final bu = appState.selectedBU?.trim();
+      final section = appState.selectedSection?.trim();
+
+      if (auditorName.isEmpty || auditeeName.isEmpty) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Auditor and auditee names are required.'),
+            backgroundColor: Color(0xFFEF4444),
+          ),
+        );
+        return;
+      }
+
+      if (company == 'Packages Convertors Limited' &&
+          (section == null || section.isEmpty)) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'Section is required. Go back and select a section on Take Test.',
+            ),
+            backgroundColor: Color(0xFFEF4444),
+          ),
+        );
+        return;
+      }
 
       final totalQuestions = questions.length;
 
@@ -407,7 +597,8 @@ class _AssessmentScreenState extends State<AssessmentScreen> {
 
       final isFlagged = score < 90;
 
-      final String assessmentIdForUpload =
+      final online = await ConnectivityService.instance.isOnline();
+      final String assessmentId =
           _editing?.id ?? DateTime.now().millisecondsSinceEpoch.toString();
 
       final List<Map<String, dynamic>> items = [];
@@ -416,120 +607,157 @@ class _AssessmentScreenState extends State<AssessmentScreen> {
                 ?.map((img) => img.path)
                 .toList() ??
             <String>[];
-        final files = _questionImages[index] ?? <File>[];
-        final urls = files.isNotEmpty
-            ? await _uploadImagesToStorage(assessmentIdForUpload, index, files)
-            : <String>[];
 
         items.add({
-          'question': questions[index]['question'],
+          'questionId': questions[index]['id']?.toString(),
+          'question': questions[index]['question']?.toString() ?? '',
+          'category': questions[index]['category']?.toString(),
+          'details': questions[index]['details']?.toString(),
           'answer': _answers[index] ?? 'N/A',
           'remarks': _questionComments[index] ?? '',
           'imagePaths': localPaths,
-          'imageUrls': urls,
+          'imageUrls': <String>[],
           'isFlagged': (_answers[index] == 'No' || _answers[index] == 'N/A'),
         });
       }
 
-      String assessmentIdToView;
+      final savedAssessment = _editing != null
+          ? SubmittedAssessment(
+              id: _editing!.id,
+              company: _editing!.company,
+              auditorName: _editing!.auditorName,
+              auditeeName: _editing!.auditeeName,
+              auditorEmail:
+                  appState.currentUser?.email ?? _editing!.auditorEmail,
+              auditeeEmail: _editing!.auditeeEmail,
+              userName: appState.currentUser?.name,
+              employeeId: appState.currentUser?.employeeId,
+              date: DateTime.now(),
+              items: items,
+              score: score,
+              isFlagged: isFlagged,
+              bu: _editing!.bu,
+              section: _editing!.section,
+              followUpDueAt: isFlagged
+                  ? (_editing!.followUpDueAt ??
+                      DateTime.now().add(const Duration(days: 14)))
+                  : null,
+              followUpSent: _editing!.followUpSent,
+              resolved: !isFlagged,
+              resolvedAt: !isFlagged ? DateTime.now() : null,
+              resolvedBy: !isFlagged ? (appState.currentUser?.name) : null,
+              pendingSync: true,
+            )
+          : SubmittedAssessment(
+              id: assessmentId,
+              company: company.isNotEmpty ? company : 'Unknown',
+              bu: bu != null && bu.isNotEmpty ? bu : null,
+              section: section != null && section.isNotEmpty ? section : null,
+              auditorName: auditorName,
+              auditeeName: auditeeName,
+              auditorEmail: appState.currentUser?.email,
+              userName: appState.currentUser?.name,
+              employeeId: appState.currentUser?.employeeId,
+              date: DateTime.now(),
+              items: items,
+              score: score,
+              isFlagged: isFlagged,
+              followUpDueAt:
+                  isFlagged ? DateTime.now().add(const Duration(days: 14)) : null,
+              pendingSync: true,
+            );
+
+      await SessionService.instance.saveAssessmentContext(
+        auditor: auditorName,
+        auditee: auditeeName,
+        company: savedAssessment.company,
+        bu: savedAssessment.bu,
+        section: savedAssessment.section,
+      );
 
       if (_editing != null) {
-        final updated = SubmittedAssessment(
-          id: _editing!.id,
-          company: _editing!.company,
-          auditorName: _editing!.auditorName,
-          auditeeName: _editing!.auditeeName,
-          date: DateTime.now(),
-          items: items,
-          score: score,
-          isFlagged: isFlagged,
-          bu: _editing!.bu,
-          section: _editing!.section,
-          followUpDueAt: isFlagged
-              ? (_editing!.followUpDueAt ??
-                  DateTime.now().add(const Duration(days: 14)))
-              : null,
-          followUpSent: _editing!.followUpSent,
-          resolved: !isFlagged,
-          resolvedAt: !isFlagged ? DateTime.now() : null,
-          resolvedBy: !isFlagged ? (appState.currentUser?.name) : null,
-        );
-
-        appState.updateSubmittedAssessment(updated);
-        assessmentIdToView = updated.id;
-
-        final emailSent = await EmailService.sendAssessmentEmail(updated);
-        if (emailSent) {
-          print('Updated assessment email sent successfully');
-        } else {
-          final error = EmailService.lastError ?? 'Unknown email error.';
-          if (mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(
-                content: Text('Assessment submitted but email failed: $error'),
-                backgroundColor: const Color(0xFFEF4444),
-                duration: const Duration(seconds: 6),
-              ),
-            );
-          }
-        }
+        appState.updateSubmittedAssessment(savedAssessment);
       } else {
-        final submitted = SubmittedAssessment(
-          id: assessmentIdForUpload,
-          company: appState.selectedCompany ?? 'Unknown',
-          bu: appState.selectedBU,
-          section: appState.selectedSection,
-          auditorName: appState.auditorName ?? 'Unknown Auditor',
-          auditeeName: appState.auditeeName ?? 'Unknown Auditee',
-          date: DateTime.now(),
-          items: items,
-          score: score,
-          isFlagged: isFlagged,
-          followUpDueAt:
-              isFlagged ? DateTime.now().add(const Duration(days: 14)) : null,
-        );
-
-        appState.addSubmittedAssessment(submitted);
-
-        assessmentIdToView = submitted.id;
-
-        final emailSent = await EmailService.sendAssessmentEmail(submitted);
-        if (emailSent) {
-          print('Assessment email sent successfully');
-        } else {
-          final error = EmailService.lastError ?? 'Unknown email error.';
-          if (mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(
-                content: Text('Assessment submitted but email failed: $error'),
-                backgroundColor: const Color(0xFFEF4444),
-                duration: const Duration(seconds: 6),
-              ),
-            );
-          }
-        }
-
-        // Save assessment to user record
-        await _saveAssessmentToUser(submitted);
+        appState.addSubmittedAssessment(savedAssessment);
       }
 
-      Navigator.of(context).pushNamed(
+      // Keep draft image files until sync uploads them (deleteImages: false).
+      await AssessmentDraftService.instance.clearDraft(deleteImages: false);
+
+      if (!mounted) return;
+
+      if (online) {
+        setState(() {
+          _submitStatusMessage = 'Uploading to server...';
+        });
+        final result =
+            await SyncService.instance.syncPendingAssessments(appState);
+        if (!mounted) return;
+
+        final savedToServer = !appState.assessments.any(
+          (a) => a.id == savedAssessment.id && a.pendingSync,
+        );
+
+        if (savedToServer) {
+          final emailMessage = result.emailQueued
+              ? 'Assessment saved to server. Notification email will be sent by the server.'
+              : result.emailSent == true
+                  ? 'Assessment saved to server. Notification email sent.'
+                  : result.emailSent == false
+                      ? 'Assessment saved to server. Email not sent: ${result.emailError ?? 'unknown error'}.'
+                      : 'Assessment saved to server.';
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(emailMessage),
+              backgroundColor: result.emailSent == false
+                  ? const Color(0xFFF59E0B)
+                  : const Color(0xFF10B981),
+              duration: Duration(seconds: result.emailSent == false ? 8 : 3),
+            ),
+          );
+        } else {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(
+                result.lastError ??
+                    'Saved on this device only. Could not reach server — tap the orange banner to retry.',
+              ),
+              backgroundColor: const Color(0xFFEF4444),
+              duration: const Duration(seconds: 8),
+            ),
+          );
+        }
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'No internet. Assessment saved on this device and will sync when online.',
+            ),
+            backgroundColor: Color(0xFFF59E0B),
+            duration: Duration(seconds: 5),
+          ),
+        );
+      }
+
+      await Navigator.of(context).pushNamed(
         '/assessmentResults',
         arguments: {
-          'assessmentId': assessmentIdToView,
-          'showLogoutOnBack': true,
+          'assessmentId': savedAssessment.id,
+          'showHomeButton': true,
           'businessUnit': _editing?.bu ??
+              savedAssessment.bu ??
               appState.selectedBU ??
               appState.selectedCompany ??
               'Unknown',
+          'section': _editing?.section ??
+              savedAssessment.section ??
+              appState.selectedSection,
           'score': score,
           'isFlagged': isFlagged,
           'resolved': _editing != null ? !isFlagged : false,
           'assessmentData': items,
-          'auditorName': _editing?.auditorName ??
-              (appState.auditorName ?? 'Unknown Auditor'),
-          'auditeeName': _editing?.auditeeName ??
-              (appState.auditeeName ?? 'Unknown Auditee'),
+          'auditorName': _editing?.auditorName ?? auditorName,
+          'auditeeName': _editing?.auditeeName ?? auditeeName,
           'assessmentDate': DateTime.now().toString().split(' ')[0],
         },
       );
@@ -543,56 +771,14 @@ class _AssessmentScreenState extends State<AssessmentScreen> {
           ),
         );
       }
-      print('Submit assessment failed: $e');
-    }
-  }
-
-  Future<void> _saveAssessmentToUser(SubmittedAssessment assessment) async {
-    try {
-      final currentUser = FirebaseAuth.instance.currentUser;
-      if (currentUser == null) {
-        print('DEBUG: No current user found');
-        return;
+      debugPrint('Submit assessment failed: $e');
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isSubmitting = false;
+          _submitStatusMessage = null;
+        });
       }
-
-      // Get employee ID from email
-      final employeeId = int.parse(currentUser.email!.split('@').first);
-      print('DEBUG: Looking for user with employeeId: $employeeId');
-
-      // Find user document
-      final userDoc = await UserService.getUserByEmployeeId(employeeId);
-      if (userDoc != null) {
-        print('DEBUG: Found user document: ${userDoc.id}');
-
-        // Convert assessment to map for storage
-        final assessmentData = {
-          'id': assessment.id,
-          'company': assessment.company,
-          'bu': assessment.bu,
-          'section': assessment.section,
-          'auditorName': assessment.auditorName,
-          'auditeeName': assessment.auditeeName,
-          'date': assessment.date.toIso8601String(),
-          'items': assessment.items,
-          'score': assessment.score,
-          'isFlagged': assessment.isFlagged,
-          'followUpDueAt': assessment.followUpDueAt?.toIso8601String(),
-          'submitted_at': DateTime.now().toIso8601String(),
-        };
-
-        print('DEBUG: Saving assessment data: $assessmentData');
-
-        await UserService.addAssessmentToUser(
-          userId: userDoc.id,
-          assessmentData: assessmentData,
-        );
-
-        print('DEBUG: Assessment saved successfully to user record');
-      } else {
-        print('DEBUG: No user document found for employeeId: $employeeId');
-      }
-    } catch (e) {
-      print('DEBUG: Error saving assessment to user record: $e');
     }
   }
 }

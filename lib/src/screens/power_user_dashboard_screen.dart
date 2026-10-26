@@ -1,11 +1,13 @@
 import 'package:flutter/material.dart';
 import '../services/follow_up_service.dart';
-import '../services/email_service.dart';
+import '../services/assessment_service.dart';
 import '../../routes.dart';
+import '../widgets/role_bottom_nav.dart';
+import '../navigation/role_section.dart';
 import 'package:provider/provider.dart';
 import '../state/app_state.dart';
-import 'package:cloud_firestore/cloud_firestore.dart';
 import '../models/submitted_assessment.dart';
+import '../widgets/loading_overlay.dart';
 
 class PowerUserDashboardScreen extends StatefulWidget {
   const PowerUserDashboardScreen({super.key});
@@ -26,6 +28,7 @@ class _PowerUserDashboardScreenState extends State<PowerUserDashboardScreen> {
   int _flaggedEmployeesCount = 0;
   double _averageScore = 0.0;
   bool _isFetchingAssessments = false;
+  final AssessmentService _assessmentService = AssessmentService();
 
   @override
   void initState() {
@@ -61,44 +64,16 @@ class _PowerUserDashboardScreenState extends State<PowerUserDashboardScreen> {
 
   Future<void> _fetchAssessmentsForPowerUser() async {
     if (_isFetchingAssessments) return;
-    _isFetchingAssessments = true;
+    if (mounted) {
+      setState(() => _isFetchingAssessments = true);
+    } else {
+      _isFetchingAssessments = true;
+    }
 
     try {
       final appState = Provider.of<AppState>(context, listen: false);
 
-      final usersSnapshot = await FirebaseFirestore.instance
-          .collection('company')
-          .doc('main')
-          .collection('users')
-          .get();
-
-      final List<SubmittedAssessment> tempAssessments = [];
-
-      for (final userDoc in usersSnapshot.docs) {
-        final userData = userDoc.data();
-        final assessmentsArray =
-            userData['assessments'] as List<dynamic>? ?? [];
-
-        final userName = userData['name'] as String? ?? 'Unknown';
-        final dynamic employeeIdRaw = userData['employeeId'];
-        final int? employeeId = employeeIdRaw is int
-            ? employeeIdRaw
-            : int.tryParse(employeeIdRaw?.toString() ?? '');
-
-        for (final assessmentData in assessmentsArray) {
-          if (assessmentData is! Map) continue;
-
-          final assessmentMap = Map<String, dynamic>.from(assessmentData);
-          assessmentMap['userName'] = userName;
-          assessmentMap['employeeId'] = employeeId;
-
-          try {
-            tempAssessments.add(SubmittedAssessment.fromJson(assessmentMap));
-          } catch (_) {
-            // Ignore corrupted entries
-          }
-        }
-      }
+      final tempAssessments = await _assessmentService.getAllAssessments();
 
       // Replace in-memory list (don't persist to disk; Firestore is source of truth)
       appState.assessments
@@ -109,7 +84,11 @@ class _PowerUserDashboardScreenState extends State<PowerUserDashboardScreen> {
         setState(() {});
       }
     } finally {
-      _isFetchingAssessments = false;
+      if (mounted) {
+        setState(() => _isFetchingAssessments = false);
+      } else {
+        _isFetchingAssessments = false;
+      }
     }
   }
 
@@ -168,44 +147,17 @@ class _PowerUserDashboardScreenState extends State<PowerUserDashboardScreen> {
   }
 
   Future<int> _fetchFlaggedEmployeesCount() async {
-    final usersSnapshot = await FirebaseFirestore.instance
-        .collection('company')
-        .doc('main')
-        .collection('users')
-        .get();
-
     final flaggedEmployeeIds = <String>{};
-
-    for (final userDoc in usersSnapshot.docs) {
-      final userData = userDoc.data();
-
-      final userBu = (userData['business_unit'] ?? userData['bu'])?.toString();
-      final userSection = userData['section']?.toString();
-
-      final buMatch = selectedBU == 'All BUs' || userBu == selectedBU;
-      final sectionMatch =
-          selectedSection == 'All Sections' || userSection == selectedSection;
+    final appState = Provider.of<AppState>(context, listen: false);
+    for (final assessment in appState.assessments) {
+      final buMatch = selectedBU == 'All BUs' || assessment.bu == selectedBU;
+      final sectionMatch = selectedSection == 'All Sections' ||
+          assessment.section == selectedSection;
       if (!buMatch || !sectionMatch) continue;
-
-      final assessments = userData['assessments'];
-      if (assessments is! List) continue;
-
-      bool hasActiveFlag = false;
-      for (final a in assessments) {
-        if (a is! Map) continue;
-        final aMap = Map<String, dynamic>.from(a);
-
-        final isFlagged = aMap['isFlagged'] == true;
-        final resolved = aMap['resolved'] == true;
-        if (isFlagged && !resolved) {
-          hasActiveFlag = true;
-          break;
-        }
-      }
-
-      if (hasActiveFlag) {
-        flaggedEmployeeIds.add(userDoc.id);
-      }
+      if (!(assessment.isFlagged && !assessment.resolved)) continue;
+      final id =
+          assessment.employeeId?.toString() ?? assessment.userName ?? '';
+      if (id.isNotEmpty) flaggedEmployeeIds.add(id);
     }
 
     return flaggedEmployeeIds.length;
@@ -365,6 +317,8 @@ class _PowerUserDashboardScreenState extends State<PowerUserDashboardScreen> {
       'Lamination',
       'Extrusion',
       'Slitting',
+      'Mechanical Workshop',
+      'Electrical Workshop',
     ],
   };
 
@@ -373,13 +327,17 @@ class _PowerUserDashboardScreenState extends State<PowerUserDashboardScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
+    return LoadingOverlay(
+      isLoading: _isFetchingAssessments,
+      message: 'Loading assessments...',
+      child: Scaffold(
       backgroundColor: const Color(0xFFF8FAFC),
       appBar: AppBar(
         title: const Text('Power User Dashboard'),
         backgroundColor: const Color(0xFF0891B2),
         foregroundColor: Colors.white,
         elevation: 0,
+        automaticallyImplyLeading: false,
         actions: [
           IconButton(
             icon: const Icon(Icons.logout),
@@ -648,7 +606,7 @@ class _PowerUserDashboardScreenState extends State<PowerUserDashboardScreen> {
             const SizedBox(height: 16),
             _buildActionButton(
               'Send Follow-up Emails',
-              'Trigger follow-up emails for overdue assessments',
+              'Run server follow-up sweep for overdue flagged assessments',
               Icons.email_outlined,
               const Color(0xFF7C3AED),
               () => FollowUpService.triggerManualFollowUpCheck(context),
@@ -657,6 +615,9 @@ class _PowerUserDashboardScreenState extends State<PowerUserDashboardScreen> {
           ],
         ),
       ),
+      bottomNavigationBar:
+          const RoleBottomNav(current: RoleSection.powerDashboard),
+    ),
     );
   }
 
@@ -683,218 +644,6 @@ class _PowerUserDashboardScreenState extends State<PowerUserDashboardScreen> {
       appState.selectPowerUserSection(selectedSection);
       _loadAssessmentCounts();
     }
-  }
-
-  Future<void> _testEmailConnection() async {
-    try {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Testing email connection...'),
-          backgroundColor: Color(0xFF0891B2),
-          duration: Duration(seconds: 2),
-        ),
-      );
-
-      final success = await EmailService.testEmailConnection();
-
-      if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(success
-                ? 'Test email sent successfully!'
-                : 'Test email failed. Check console for details.'),
-            backgroundColor:
-                success ? const Color(0xFF10B981) : const Color(0xFFEF4444),
-            duration: const Duration(seconds: 4),
-          ),
-        );
-      }
-    } catch (e) {
-      if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Test email error: $e'),
-            backgroundColor: const Color(0xFFEF4444),
-            duration: const Duration(seconds: 4),
-          ),
-        );
-      }
-    }
-  }
-
-  void _showEmailLog() {
-    final emailLog = EmailService.getEmailLog();
-
-    showDialog(
-      context: context,
-      builder: (BuildContext context) {
-        return AlertDialog(
-          title: const Row(
-            children: [
-              Icon(Icons.list_alt, color: Color(0xFF6366F1)),
-              SizedBox(width: 8),
-              Text('Email Log'),
-            ],
-          ),
-          content: SizedBox(
-            width: double.maxFinite,
-            height: 400,
-            child: emailLog.isEmpty
-                ? const Center(
-                    child: Column(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        Icon(Icons.inbox_outlined,
-                            size: 48, color: Colors.grey),
-                        SizedBox(height: 16),
-                        Text(
-                          'No emails logged yet',
-                          style: TextStyle(color: Colors.grey, fontSize: 16),
-                        ),
-                        Text(
-                          'Send test emails or submit assessments to see logs',
-                          style: TextStyle(color: Colors.grey, fontSize: 12),
-                          textAlign: TextAlign.center,
-                        ),
-                      ],
-                    ),
-                  )
-                : ListView.builder(
-                    itemCount: emailLog.length,
-                    itemBuilder: (context, index) {
-                      final log = emailLog.reversed
-                          .toList()[index]; // Show newest first
-                      return Card(
-                        margin: const EdgeInsets.only(bottom: 8),
-                        child: ListTile(
-                          leading: CircleAvatar(
-                            backgroundColor: log['type'] == 'test_email'
-                                ? const Color(0xFF059669).withOpacity(0.1)
-                                : log['type'] == 'assessment_email'
-                                    ? const Color(0xFF0891B2).withOpacity(0.1)
-                                    : const Color(0xFF7C3AED).withOpacity(0.1),
-                            child: Icon(
-                              log['type'] == 'test_email'
-                                  ? Icons.email
-                                  : log['type'] == 'assessment_email'
-                                      ? Icons.assessment
-                                      : Icons.email_outlined,
-                              color: log['type'] == 'test_email'
-                                  ? const Color(0xFF059669)
-                                  : log['type'] == 'assessment_email'
-                                      ? const Color(0xFF0891B2)
-                                      : const Color(0xFF7C3AED),
-                              size: 20,
-                            ),
-                          ),
-                          title: Text(
-                            log['subject'] ?? 'No Subject',
-                            style: const TextStyle(fontWeight: FontWeight.bold),
-                          ),
-                          subtitle: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text('To: ${(log['to'] as List).join(', ')}'),
-                              Text(
-                                  'Time: ${DateTime.parse(log['timestamp']).toString().split('.')[0]}'),
-                              if (log['simulation'] == true)
-                                Container(
-                                  padding: const EdgeInsets.symmetric(
-                                      horizontal: 6, vertical: 2),
-                                  decoration: BoxDecoration(
-                                    color: Colors.orange.withOpacity(0.1),
-                                    borderRadius: BorderRadius.circular(4),
-                                  ),
-                                  child: const Text(
-                                    'SIMULATION',
-                                    style: TextStyle(
-                                      color: Colors.orange,
-                                      fontSize: 10,
-                                      fontWeight: FontWeight.bold,
-                                    ),
-                                  ),
-                                ),
-                            ],
-                          ),
-                          trailing: const Icon(Icons.check_circle,
-                              color: Colors.green),
-                        ),
-                      );
-                    },
-                  ),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () {
-                EmailService.clearEmailLog();
-                Navigator.of(context).pop();
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(
-                    content: Text('Email log cleared'),
-                    backgroundColor: Color(0xFF6366F1),
-                  ),
-                );
-              },
-              child: const Text('Clear Log'),
-            ),
-            TextButton(
-              onPressed: () => Navigator.of(context).pop(),
-              child: const Text('Close'),
-            ),
-          ],
-        );
-      },
-    );
-  }
-
-  void _exportEmailLog() {
-    final emailLog = EmailService.exportEmailLog();
-
-    showDialog(
-      context: context,
-      builder: (BuildContext context) {
-        return AlertDialog(
-          title: const Row(
-            children: [
-              Icon(Icons.download, color: Color(0xFF7C3AED)),
-              SizedBox(width: 8),
-              Text('Export Email Log'),
-            ],
-          ),
-          content: SizedBox(
-            width: double.maxFinite,
-            height: 500,
-            child: SingleChildScrollView(
-              child: SelectableText(
-                emailLog,
-                style: const TextStyle(
-                  fontFamily: 'monospace',
-                  fontSize: 12,
-                ),
-              ),
-            ),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () {
-                // Copy to clipboard
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(
-                    content: Text('Email log copied to clipboard'),
-                    backgroundColor: Color(0xFF7C3AED),
-                  ),
-                );
-              },
-              child: const Text('Copy to Clipboard'),
-            ),
-            TextButton(
-              onPressed: () => Navigator.of(context).pop(),
-              child: const Text('Close'),
-            ),
-          ],
-        );
-      },
-    );
   }
 
   Widget _buildBUDropdown() {

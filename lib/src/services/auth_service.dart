@@ -1,93 +1,83 @@
+import 'api_service.dart';
+import '../util/jwt_util.dart';
+import 'connectivity_service.dart';
+import 'session_service.dart';
+
 class AuthService {
-  // Simulate a successful signup
-  Future<Map<String, dynamic>> signUp({
-    required String email,
-    required String password,
-    required String name,
-  }) async {
-    // Simulate network delay
-    await Future.delayed(const Duration(seconds: 1));
-
-    // Return a dummy success response
-    return {
-      'success': true,
-      'message': 'Signup successful',
-      'data': {
-        'user': {
-          'id': 'dummy_user_123',
-          'email': email,
-          'name': name,
-          'createdAt': DateTime.now().toIso8601String(),
-        },
-        'token': 'dummy_jwt_token_1234567890',
-      }
-    };
-  }
-
-  // Simulate a successful login
   Future<Map<String, dynamic>> signIn({
     required String email,
     required String password,
   }) async {
-    // Simulate network delay
-    await Future.delayed(const Duration(seconds: 1));
+    final response = await ApiService.post(
+      '/auth/login',
+      {'email': email, 'password': password},
+      auth: false,
+    );
+    final data = Map<String, dynamic>.from(response['data'] ?? {});
+    final token = data['accessToken']?.toString();
+    if (token == null || token.isEmpty) {
+      throw Exception('Login succeeded but token is missing.');
+    }
+    await ApiService.setAccessToken(token);
 
-    // Check for demo credentials
-    if (email == 'demo@example.com' && password == 'password') {
-      return {
-        'success': true,
-        'message': 'Login successful',
-        'data': {
-          'user': {
-            'id': 'demo_user_123',
-            'email': email,
-            'name': 'Demo User',
-            'createdAt': '2023-01-01T00:00:00.000Z',
-          },
-          'token': 'demo_jwt_token_1234567890',
-        }
-      };
+    final refreshToken = data['refreshToken']?.toString() ??
+        data['refresh_token']?.toString();
+    if (refreshToken != null && refreshToken.isNotEmpty) {
+      await ApiService.setRefreshToken(refreshToken);
     }
 
-    // Default success response for any other credentials
-    return {
-      'success': true,
-      'message': 'Login successful',
-      'data': {
-        'user': {
-          'id': 'dummy_user_123',
-          'email': email,
-          'name': email.split('@').first,
-          'createdAt': DateTime.now().toIso8601String(),
-        },
-        'token': 'dummy_jwt_token_${DateTime.now().millisecondsSinceEpoch}',
-      }
-    };
+    return data;
   }
 
-  // Simulate getting the current user
-  Future<Map<String, dynamic>> getCurrentUser() async {
-    await Future.delayed(const Duration(milliseconds: 500));
-    return {
-      'id': 'dummy_user_123',
-      'email': 'user@example.com',
-      'name': 'Test User',
-      'createdAt': '2023-01-01T00:00:00.000Z',
-    };
+  /// Refreshes access token when close to expiry (requires connectivity).
+  Future<void> ensureValidAccessToken() async {
+    final access = await ApiService.getAccessToken();
+    if (access == null || access.isEmpty) {
+      throw Exception('No saved session token.');
+    }
+
+    if (!JwtUtil.isExpired(access)) return;
+
+    if (!await ConnectivityService.instance.isOnline()) {
+      // Allow short grace period offline if token not fully expired yet.
+      final exp = JwtUtil.expiry(access);
+      if (exp != null && DateTime.now().isBefore(exp)) return;
+      throw Exception('Session expired. Connect to internet to refresh login.');
+    }
+
+    await refreshAccessToken();
   }
 
-  // Simulate sign out
+  Future<void> refreshAccessToken() async {
+    final refresh = await ApiService.getRefreshToken();
+    if (refresh == null || refresh.isEmpty) {
+      throw Exception(
+        'Session expired and no refresh token available. Please sign in again.',
+      );
+    }
+
+    final response = await ApiService.post(
+      '/auth/refresh',
+      {'refreshToken': refresh},
+      auth: false,
+    );
+
+    final data = Map<String, dynamic>.from(response['data'] ?? response);
+    final newAccess = data['accessToken']?.toString() ??
+        data['access_token']?.toString();
+    if (newAccess == null || newAccess.isEmpty) {
+      throw Exception('Token refresh failed: missing access token.');
+    }
+    await ApiService.setAccessToken(newAccess);
+
+    final newRefresh = data['refreshToken']?.toString() ??
+        data['refresh_token']?.toString();
+    if (newRefresh != null && newRefresh.isNotEmpty) {
+      await ApiService.setRefreshToken(newRefresh);
+    }
+  }
+
   Future<void> signOut() async {
-    await Future.delayed(const Duration(milliseconds: 300));
-    // No-op for dummy implementation
-  }
-
-  // Simulate password reset
-  Future<Map<String, dynamic>> resetPassword(String email) async {
-    await Future.delayed(const Duration(seconds: 1));
-    return {
-      'success': true,
-      'message': 'Password reset email sent to $email',
-    };
+    await SessionService.instance.clearSession();
   }
 }

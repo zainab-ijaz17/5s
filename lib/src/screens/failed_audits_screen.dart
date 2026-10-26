@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import '../util/assessment_item_util.dart';
 import '../state/app_state.dart';
 import '../models/submitted_assessment.dart';
 import '../services/assessment_service.dart';
@@ -110,9 +111,12 @@ class _FailedAuditsScreenState extends State<FailedAuditsScreen> {
               final assessment = failedAssessments[index];
 
               // Get the first flagged item's details as the reason
-              final flaggedItem = assessment.items.firstWhere(
+              final flaggedItem = assessment.items
+                  .map((item) => AssessmentItemUtil.normalizeItem(
+                      Map<String, dynamic>.from(item)))
+                  .firstWhere(
                 (item) => item['isFlagged'] == true,
-                orElse: () => {'question': 'N/A'},
+                orElse: () => {'question': 'N/A', 'remarks': ''},
               );
 
               return Container(

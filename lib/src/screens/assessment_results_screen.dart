@@ -1,58 +1,85 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'dart:io';
-import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:firebase_auth/firebase_auth.dart';
 import '../../routes.dart';
+import '../services/connectivity_service.dart';
+import '../services/assessment_service.dart';
 import '../state/app_state.dart';
 import '../models/submitted_assessment.dart';
+import '../util/assessment_item_util.dart';
+import '../widgets/loading_overlay.dart';
 
-class AssessmentResultsScreen extends StatelessWidget {
+class AssessmentResultsScreen extends StatefulWidget {
   const AssessmentResultsScreen({super.key});
 
-  List<Map<String, dynamic>> _normalizeItems(dynamic rawItems) {
-    if (rawItems is List<Map<String, dynamic>>) return rawItems;
-    if (rawItems is List) {
-      return rawItems
-          .whereType<Map>()
-          .map((e) => Map<String, dynamic>.from(e))
-          .toList();
-    }
-    return <Map<String, dynamic>>[];
+  @override
+  State<AssessmentResultsScreen> createState() => _AssessmentResultsScreenState();
+}
+
+class _AssessmentResultsScreenState extends State<AssessmentResultsScreen> {
+  final AssessmentService _assessmentService = AssessmentService();
+  SubmittedAssessment? _fetchedAssessment;
+  bool _loadingDetails = false;
+  String? _loadError;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) => _loadAssessment());
   }
 
-  Future<List<Map<String, dynamic>>> _fetchAssessmentItemsFromFirestore(
-      String assessmentId) async {
-    final usersSnapshot = await FirebaseFirestore.instance
-        .collection('company')
-        .doc('main')
-        .collection('users')
-        .get();
+  Future<void> _loadAssessment() async {
+    final args =
+        ModalRoute.of(context)?.settings.arguments as Map<String, dynamic>?;
+    final assessmentId = args?['assessmentId'] as String?;
+    if (assessmentId == null) return;
 
-    for (final userDoc in usersSnapshot.docs) {
-      final userData = userDoc.data();
-      final assessments = userData['assessments'];
-      if (assessments is! List) continue;
+    final online = await ConnectivityService.instance.isOnline();
+    if (!online) return;
 
-      for (final a in assessments) {
-        if (a is! Map) continue;
-        final aMap = Map<String, dynamic>.from(a);
-        final id = aMap['id']?.toString();
-        if (id != assessmentId) continue;
+    setState(() {
+      _loadingDetails = true;
+      _loadError = null;
+    });
 
-        final rawItems =
-            aMap['items'] ?? aMap['assessmentData'] ?? aMap['data'];
-        if (rawItems is List) {
-          return List<Map<String, dynamic>>.from(rawItems
-              .whereType<Map>()
-              .map((e) => Map<String, dynamic>.from(e)));
-        }
+    try {
+      final fetched = await _assessmentService.getAssessmentById(assessmentId);
+      if (!mounted) return;
 
-        return <Map<String, dynamic>>[];
+      if (fetched != null) {
+        final appState = Provider.of<AppState>(context, listen: false);
+        appState.upsertSubmittedAssessment(fetched);
+        setState(() {
+          _fetchedAssessment = fetched;
+          _loadingDetails = false;
+        });
+        return;
       }
-    }
 
-    return <Map<String, dynamic>>[];
+      setState(() {
+        _loadingDetails = false;
+        _loadError = 'Assessment not found on server.';
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _loadingDetails = false;
+        _loadError = 'Could not load assessment details.';
+      });
+    }
+  }
+
+  List<Map<String, dynamic>> _resolveAssessmentItems(
+    SubmittedAssessment? sa,
+    Map<String, dynamic>? args,
+  ) {
+    final fromFetched = AssessmentItemUtil.parseItems(_fetchedAssessment?.items);
+    if (fromFetched.isNotEmpty) return fromFetched;
+
+    final fromState = AssessmentItemUtil.parseItems(sa?.items);
+    if (fromState.isNotEmpty) return fromState;
+
+    return AssessmentItemUtil.parseItems(args?['assessmentData']);
   }
 
   @override
@@ -60,10 +87,11 @@ class AssessmentResultsScreen extends StatelessWidget {
     final args =
         ModalRoute.of(context)?.settings.arguments as Map<String, dynamic>?;
     final String? assessmentId = args?['assessmentId'] as String?;
-    final bool showLogoutOnBack = args?['showLogoutOnBack'] == true;
+    final bool showHomeButton =
+        args?['showHomeButton'] == true || args?['showLogoutOnBack'] == true;
 
-    SubmittedAssessment? sa;
-    if (assessmentId != null) {
+    SubmittedAssessment? sa = _fetchedAssessment;
+    if (sa == null && assessmentId != null) {
       final appState = Provider.of<AppState>(context);
       for (final a in appState.assessments) {
         if (a.id == assessmentId) {
@@ -80,8 +108,7 @@ class AssessmentResultsScreen extends StatelessWidget {
     final score = sa?.score ?? (args?['score'] as int?) ?? 0;
     final isFlagged = sa?.isFlagged ?? (args?['isFlagged'] as bool?) ?? false;
     final bool resolved = sa?.resolved ?? (args?['resolved'] as bool?) ?? false;
-    final assessmentData =
-        _normalizeItems(sa?.items ?? args?['assessmentData']);
+    final assessmentData = _resolveAssessmentItems(sa, args);
     final auditorName = sa?.auditorName ??
         (args?['auditorName'] as String?) ??
         'Unknown Auditor';
@@ -105,23 +132,17 @@ class AssessmentResultsScreen extends StatelessWidget {
         foregroundColor: Colors.white,
         elevation: 0,
         centerTitle: true,
-        leading: IconButton(
-          icon: Icon(showLogoutOnBack ? Icons.logout : Icons.arrow_back),
-          onPressed: () async {
-            if (showLogoutOnBack) {
-              await FirebaseAuth.instance.signOut();
-              if (context.mounted) {
-                Navigator.pushNamedAndRemoveUntil(
-                  context,
-                  Routes.login,
-                  (route) => false,
-                );
-              }
-            } else {
-              Navigator.of(context).maybePop();
-            }
-          },
-        ),
+        automaticallyImplyLeading: !showHomeButton,
+        leading: showHomeButton
+            ? IconButton(
+                icon: const Icon(Icons.home),
+                tooltip: 'Back to Home',
+                onPressed: () => _goHome(context),
+              )
+            : IconButton(
+                icon: const Icon(Icons.arrow_back),
+                onPressed: () => Navigator.of(context).maybePop(),
+              ),
       ),
       body: Padding(
         padding: const EdgeInsets.all(16.0),
@@ -266,135 +287,102 @@ class AssessmentResultsScreen extends StatelessWidget {
             ),
             const SizedBox(height: 16),
             Expanded(
-              child: assessmentData.isNotEmpty
-                  ? ListView.builder(
-                      itemCount: assessmentData.length,
-                      itemBuilder: (context, index) {
-                        final questionData = assessmentData[index];
-
-                        final List<String> imageList = [];
-                        final imageUrlsRaw = questionData['imageUrls'];
-                        if (imageUrlsRaw is List) {
-                          imageList.addAll(imageUrlsRaw
-                              .map((e) => e.toString())
-                              .where((e) => e.isNotEmpty));
-                        }
-
-                        final legacySingle =
-                            questionData['imagePath']?.toString();
-                        if (legacySingle != null && legacySingle.isNotEmpty) {
-                          imageList.add(legacySingle);
-                        }
-
-                        final imagePathsRaw = questionData['imagePaths'];
-                        if (imagePathsRaw is List) {
-                          imageList.addAll(imagePathsRaw
-                              .map((e) => e.toString())
-                              .where((e) => e.isNotEmpty));
-                        }
-
-                        return _buildQuestionResultCard(
-                          questionData['question'] ?? 'Question ${index + 1}',
-                          questionData['answer']?.toString() ?? 'No answer',
-                          questionData['remarks']?.toString() ?? '',
-                          imageList,
-                          questionData['isFlagged'] == true,
-                        );
-                      },
+              child: _loadingDetails
+                  ? const Center(
+                      child: LoadingPanel(
+                        message: 'Loading assessment details...',
+                      ),
                     )
-                  : (assessmentId == null
-                      ? const Center(
+                  : assessmentData.isNotEmpty
+                      ? ListView.builder(
+                          padding: EdgeInsets.only(bottom: showHomeButton ? 8 : 0),
+                          itemCount: assessmentData.length,
+                          itemBuilder: (context, index) {
+                            final questionData = assessmentData[index];
+                            final questionText =
+                                questionData['question']?.toString().trim();
+                            final imageList =
+                                AssessmentItemUtil.imagePathsFromItem(
+                                    questionData);
+
+                            return _buildQuestionResultCard(
+                              questionText?.isNotEmpty == true
+                                  ? questionText!
+                                  : 'Question ${index + 1}',
+                              questionData['category']?.toString() ?? 'GENERAL',
+                              questionData['details']?.toString() ?? '',
+                              questionData['answer']?.toString() ?? 'No answer',
+                              questionData['remarks']?.toString() ?? '',
+                              imageList,
+                              questionData['isFlagged'] == true,
+                            );
+                          },
+                        )
+                      : Center(
                           child: Text(
-                            'No assessment data available',
-                            style: TextStyle(
+                            _loadError ??
+                                'No assessment data available',
+                            style: const TextStyle(
                               fontSize: 16,
                               color: Color(0xFF6B7280),
                             ),
+                            textAlign: TextAlign.center,
                           ),
-                        )
-                      : FutureBuilder<List<Map<String, dynamic>>>(
-                          future:
-                              _fetchAssessmentItemsFromFirestore(assessmentId),
-                          builder: (context, snapshot) {
-                            if (snapshot.connectionState ==
-                                ConnectionState.waiting) {
-                              return const Center(
-                                  child: CircularProgressIndicator());
-                            }
-
-                            final remoteItems =
-                                snapshot.data ?? const <Map<String, dynamic>>[];
-
-                            if (remoteItems.isEmpty) {
-                              return const Center(
-                                child: Text(
-                                  'No assessment data available',
-                                  style: TextStyle(
-                                    fontSize: 16,
-                                    color: Color(0xFF6B7280),
-                                  ),
-                                ),
-                              );
-                            }
-
-                            return ListView.builder(
-                              itemCount: remoteItems.length,
-                              itemBuilder: (context, index) {
-                                final questionData = remoteItems[index];
-
-                                final List<String> imageList = [];
-                                final imageUrlsRaw = questionData['imageUrls'];
-                                if (imageUrlsRaw is List) {
-                                  imageList.addAll(imageUrlsRaw
-                                      .map((e) => e.toString())
-                                      .where((e) => e.isNotEmpty));
-                                }
-
-                                final legacySingle =
-                                    questionData['imagePath']?.toString();
-                                if (legacySingle != null &&
-                                    legacySingle.isNotEmpty) {
-                                  imageList.add(legacySingle);
-                                }
-
-                                final imagePathsRaw =
-                                    questionData['imagePaths'];
-                                if (imagePathsRaw is List) {
-                                  imageList.addAll(imagePathsRaw
-                                      .map((e) => e.toString())
-                                      .where((e) => e.isNotEmpty));
-                                }
-
-                                return _buildQuestionResultCard(
-                                  questionData['question'] ??
-                                      'Question ${index + 1}',
-                                  questionData['answer']?.toString() ??
-                                      'No answer',
-                                  questionData['remarks']?.toString() ?? '',
-                                  imageList,
-                                  questionData['isFlagged'] == true,
-                                );
-                              },
-                            );
-                          },
-                        )),
+                        ),
             ),
           ],
         ),
       ),
+      bottomNavigationBar: showHomeButton
+          ? SafeArea(
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
+                child: SizedBox(
+                  width: double.infinity,
+                  height: 52,
+                  child: ElevatedButton.icon(
+                    onPressed: () => _goHome(context),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: const Color(0xFF0891B2),
+                      foregroundColor: Colors.white,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                    ),
+                    icon: const Icon(Icons.home),
+                    label: const Text(
+                      'Back to Home',
+                      style: TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            )
+          : null,
+    );
+  }
+
+  void _goHome(BuildContext context) {
+    Navigator.pushNamedAndRemoveUntil(
+      context,
+      Routes.takeTest,
+      (route) => false,
     );
   }
 
   Color _getAnswerColor(String answer) {
     switch (answer.toLowerCase()) {
       case 'yes':
-        return const Color(0xFF10B981); // Green
+        return const Color(0xFF10B981);
       case 'no':
-        return const Color(0xFFEF4444); // Red
+        return const Color(0xFFEF4444);
       case 'n/a':
-        return const Color(0xFF6B7280); // Gray
+        return const Color(0xFF6B7280);
       default:
-        return const Color(0xFF0891B2); // Blue
+        return const Color(0xFF0891B2);
     }
   }
 
@@ -497,39 +485,31 @@ class AssessmentResultsScreen extends StatelessWidget {
     );
   }
 
-  Widget _buildQuestionResultCard(dynamic question, String answer,
-      String remarks, List<String> images, bool isFlagged) {
+  Widget _buildQuestionResultCard(
+    String questionText,
+    String category,
+    String details,
+    String answer,
+    String remarks,
+    List<String> images,
+    bool isFlagged,
+  ) {
     bool isExpanded = false;
     return StatefulBuilder(
       builder: (context, setState) {
         final answerColor = _getAnswerColor(answer);
+        final normalizedCategory = category.toUpperCase();
 
-        // Handle both string and map question types
-        String questionText;
-        String category = 'GENERAL';
-        String details = '';
-
-        if (question is Map<String, dynamic>) {
-          questionText = question['question']?.toString() ?? 'Question';
-          category = question['category']?.toString() ?? 'GENERAL';
-          details = question['details']?.toString() ?? '';
-        } else if (question is String) {
-          questionText = question;
-        } else {
-          questionText = 'Question';
-        }
-
-        // Define colors for each 5S category
         final categoryColors = {
-          'SORT': const Color(0xFF3B82F6), // Blue
-          'SET': const Color(0xFF10B981), // Green
-          'SHINE': const Color(0xFFF59E0B), // Amber
-          'STANDARDIZE': const Color(0xFF8B5CF6), // Purple
-          'SUSTAIN': const Color(0xFFEC4899), // Pink
+          'SORT': const Color(0xFF3B82F6),
+          'SET': const Color(0xFF10B981),
+          'SHINE': const Color(0xFFF59E0B),
+          'STANDARDIZE': const Color(0xFF8B5CF6),
+          'SUSTAIN': const Color(0xFFEC4899),
         };
 
         final categoryColor =
-            categoryColors[category] ?? const Color(0xFF0891B2);
+            categoryColors[normalizedCategory] ?? const Color(0xFF0891B2);
 
         return Container(
           margin: const EdgeInsets.only(bottom: 16),
@@ -559,7 +539,6 @@ class AssessmentResultsScreen extends StatelessWidget {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    // Category badge
                     Container(
                       padding: const EdgeInsets.symmetric(
                           horizontal: 10, vertical: 4),
@@ -570,7 +549,7 @@ class AssessmentResultsScreen extends StatelessWidget {
                             Border.all(color: categoryColor.withOpacity(0.3)),
                       ),
                       child: Text(
-                        category,
+                        normalizedCategory,
                         style: TextStyle(
                           color: categoryColor,
                           fontSize: 11,
@@ -580,8 +559,6 @@ class AssessmentResultsScreen extends StatelessWidget {
                       ),
                     ),
                     const SizedBox(height: 12),
-
-                    // Question text
                     Text(
                       questionText,
                       style: const TextStyle(
@@ -591,10 +568,7 @@ class AssessmentResultsScreen extends StatelessWidget {
                         height: 1.4,
                       ),
                     ),
-
                     const SizedBox(height: 12),
-
-                    // Answer section
                     Row(
                       children: [
                         Icon(
@@ -615,8 +589,6 @@ class AssessmentResultsScreen extends StatelessWidget {
                         ),
                       ],
                     ),
-
-                    // Show more/less button if there are details, remarks, or an image
                     if (details.isNotEmpty ||
                         remarks.isNotEmpty ||
                         images.isNotEmpty) ...[
@@ -644,8 +616,6 @@ class AssessmentResultsScreen extends StatelessWidget {
                         ),
                       ),
                     ],
-
-                    // Expandable content
                     if (isExpanded) ...[
                       const SizedBox(height: 12),
                       if (details.isNotEmpty) ...[

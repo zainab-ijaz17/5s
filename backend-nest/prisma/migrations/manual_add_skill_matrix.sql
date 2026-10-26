@@ -1,0 +1,2 @@
+-- Skill Matrix tables (also applied via `npx prisma db push`)
+-- Seed: npm run seed:skill-matrix

@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 import '../../routes.dart';
+import '../widgets/role_bottom_nav.dart';
+import '../navigation/role_section.dart';
 
 class BUSelectionScreen extends StatelessWidget {
   const BUSelectionScreen({super.key});
@@ -11,6 +13,7 @@ class BUSelectionScreen extends StatelessWidget {
       appBar: AppBar(
         backgroundColor: const Color(0xFF1E40AF),
         elevation: 0,
+        automaticallyImplyLeading: false,
         title: const Text(
           'Select Business Unit',
           style: TextStyle(
@@ -20,6 +23,16 @@ class BUSelectionScreen extends StatelessWidget {
           ),
         ),
         centerTitle: true,
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.logout, color: Colors.white),
+            onPressed: () => Navigator.pushNamedAndRemoveUntil(
+              context,
+              Routes.login,
+              (route) => false,
+            ),
+          ),
+        ],
       ),
       body: SafeArea(
         child: Padding(
@@ -77,6 +90,7 @@ class BUSelectionScreen extends StatelessWidget {
           ),
         ),
       ),
+      bottomNavigationBar: const RoleBottomNav(current: RoleSection.buDashboard),
     );
   }
 

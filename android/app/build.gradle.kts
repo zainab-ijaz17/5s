@@ -10,7 +10,7 @@ if (keystorePropertiesFile.exists()) {
 fun releaseKeystoreIsConfigured(): Boolean {
     if (!keystorePropertiesFile.exists()) return false
     val path = keystoreProperties.getProperty("storeFile") ?: return false
-    val store = file(path)
+    val store = rootProject.file(path)
     if (!store.isFile) return false
     val alias = keystoreProperties.getProperty("keyAlias")
     val storePwd = keystoreProperties.getProperty("storePassword")
@@ -37,7 +37,7 @@ android {
             if (releaseKeystoreIsConfigured()) {
                 keyAlias = keystoreProperties.getProperty("keyAlias")
                 keyPassword = keystoreProperties.getProperty("keyPassword")
-                storeFile = file(keystoreProperties.getProperty("storeFile")!!)
+                storeFile = rootProject.file(keystoreProperties.getProperty("storeFile")!!)
                 storePassword = keystoreProperties.getProperty("storePassword")
             }
         }

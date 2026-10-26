@@ -1,3 +1,4 @@
+import '../util/assessment_item_util.dart';
 
 class SubmittedAssessment {
   final String id;
@@ -20,6 +21,8 @@ class SubmittedAssessment {
   final bool resolved; // whether flagged issues have been addressed
   final DateTime? resolvedAt; // when it was marked resolved
   final String? resolvedBy; // user who resolved
+  /// True when saved locally and waiting to upload to API.
+  final bool pendingSync;
 
   SubmittedAssessment({
     required this.id,
@@ -41,6 +44,7 @@ class SubmittedAssessment {
     this.resolved = false,
     this.resolvedAt,
     this.resolvedBy,
+    this.pendingSync = false,
   });
 
   // Add copyWith method if you don't have one
@@ -64,6 +68,7 @@ class SubmittedAssessment {
     bool? resolved,
     DateTime? resolvedAt,
     String? resolvedBy,
+    bool? pendingSync,
   }) {
     return SubmittedAssessment(
       id: id ?? this.id,
@@ -85,6 +90,7 @@ class SubmittedAssessment {
       resolved: resolved ?? this.resolved,
       resolvedAt: resolvedAt ?? this.resolvedAt,
       resolvedBy: resolvedBy ?? this.resolvedBy,
+      pendingSync: pendingSync ?? this.pendingSync,
     );
   }
 
@@ -109,6 +115,7 @@ class SubmittedAssessment {
         'resolved': resolved,
         'resolvedAt': resolvedAt?.toIso8601String(),
         'resolvedBy': resolvedBy,
+        'pendingSync': pendingSync,
       };
 
   factory SubmittedAssessment.fromJson(Map<String, dynamic> json) {
@@ -129,23 +136,20 @@ class SubmittedAssessment {
         auditeeEmail: json['auditeeEmail']?.toString(),
         userName: json['userName']?.toString(),
         employeeId: parsedEmployeeId,
-        date: json['date'] != null
-            ? DateTime.tryParse(json['date'].toString()) ?? DateTime.now()
-            : DateTime.now(),
-        items: json['items'] != null
-            ? List<Map<String, dynamic>>.from(json['items'])
-            : [],
-        score: json['score']?.toInt() ?? 0,
-        isFlagged: json['isFlagged']?.toString().toLowerCase() == 'true',
+        date: AssessmentItemUtil.parseAssessmentDate(json),
+        items: AssessmentItemUtil.parseItems(json['items']),
+        score: AssessmentItemUtil.parseScore(json['score']),
+        isFlagged: AssessmentItemUtil.parseBool(json['isFlagged']),
         followUpDueAt: json['followUpDueAt'] != null
             ? DateTime.tryParse(json['followUpDueAt'].toString())
             : null,
-        followUpSent: json['followUpSent']?.toString().toLowerCase() == 'true',
-        resolved: json['resolved']?.toString().toLowerCase() == 'true',
+        followUpSent: AssessmentItemUtil.parseBool(json['followUpSent']),
+        resolved: AssessmentItemUtil.parseBool(json['resolved']),
         resolvedAt: json['resolvedAt'] != null
             ? DateTime.tryParse(json['resolvedAt'].toString())
             : null,
         resolvedBy: json['resolvedBy']?.toString(),
+        pendingSync: AssessmentItemUtil.parseBool(json['pendingSync']),
       );
     } catch (e) {
       print('Error parsing SubmittedAssessment from JSON: $e');

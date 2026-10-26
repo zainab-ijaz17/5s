@@ -1,9 +1,16 @@
 import 'package:flutter/material.dart';
 import '../../routes.dart';
+import '../widgets/role_bottom_nav.dart';
+import '../navigation/role_section.dart';
+import '../navigation/role_navigation.dart';
 import 'package:provider/provider.dart';
 import '../state/app_state.dart';
 import '../services/user_service.dart';
-import 'package:firebase_auth/firebase_auth.dart';
+import '../services/session_service.dart';
+import '../services/assessment_draft_service.dart';
+import '../models/assessment_draft.dart';
+import '../widgets/loading_overlay.dart';
+import '../widgets/assessment_draft_banner.dart';
 
 class TakeTestScreen extends StatefulWidget {
   const TakeTestScreen({super.key});
@@ -12,7 +19,8 @@ class TakeTestScreen extends StatefulWidget {
   State<TakeTestScreen> createState() => _TakeTestScreenState();
 }
 
-class _TakeTestScreenState extends State<TakeTestScreen> {
+class _TakeTestScreenState extends State<TakeTestScreen>
+    with WidgetsBindingObserver {
   final Map<String, List<String>> pclBUSections = {
     'BUFC': [
       'Folding & Gluing',
@@ -20,7 +28,7 @@ class _TakeTestScreenState extends State<TakeTestScreen> {
       'Roto Line',
       'Sorting & Breaking'
     ],
-    'BUFP': ['Printing', 'Lamination', 'Extrusion', 'Slitting'],
+    'BUFP': ['Printing', 'Lamination', 'Extrusion', 'Slitting', 'Mechanical Workshop', 'Electrical Workshop'],
     'BUCP': ['Facial Tissue', 'Non-Tissue', 'Tissue Roll', 'PM-09', 'FemCare'],
   };
 
@@ -61,12 +69,191 @@ class _TakeTestScreenState extends State<TakeTestScreen> {
   String? selectedSection;
   String? userBusinessUnit; // User's BU from Firestore
   bool isLoadingBU = false;
+  bool _isStarting = false;
   bool _restoredSelections = false;
+  AssessmentDraft? _draft;
+  bool _draftPromptShown = false;
+
+  bool _isTakeTestVisible() {
+    final route = ModalRoute.of(context);
+    return mounted && (route?.isCurrent ?? false);
+  }
+
+  Future<void> _openAssessment({bool resumeDraft = false}) async {
+    await Navigator.pushNamed(
+      context,
+      Routes.assessment,
+      arguments: resumeDraft ? const {'resumeDraft': true} : null,
+    );
+    if (!mounted) return;
+    _draftPromptShown = false;
+    await _loadDraft();
+  }
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _fetchUserBusinessUnit();
+    WidgetsBinding.instance.addPostFrameCallback((_) => _loadDraft());
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      if (AssessmentDraftService.instance.isAssessmentScreenOpen) return;
+      if (!_isTakeTestVisible()) return;
+      _loadDraft(showPrompt: true);
+    }
+  }
+
+  Future<void> _loadDraft({bool showPrompt = false}) async {
+    if (!mounted) return;
+    if (AssessmentDraftService.instance.isAssessmentScreenOpen) return;
+
+    final appState = Provider.of<AppState>(context, listen: false);
+    final draft = await AssessmentDraftService.instance.loadDraft(
+      userId: appState.currentUser?.id,
+      employeeId: appState.currentUser?.employeeId,
+    );
+    if (!mounted) return;
+
+    setState(() => _draft = draft);
+
+    if (draft != null &&
+        showPrompt &&
+        !_draftPromptShown &&
+        _isTakeTestVisible() &&
+        !AssessmentDraftService.instance.isAssessmentScreenOpen) {
+      _draftPromptShown = true;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted ||
+            !_isTakeTestVisible() ||
+            AssessmentDraftService.instance.isAssessmentScreenOpen) {
+          return;
+        }
+        _showDraftResumeSheet(draft);
+      });
+    }
+  }
+
+  Future<void> _showDraftResumeSheet(AssessmentDraft draft) async {
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (ctx) => Padding(
+        padding: EdgeInsets.fromLTRB(
+          16,
+          16,
+          16,
+          16 + MediaQuery.of(ctx).padding.bottom,
+        ),
+        child: AssessmentDraftBanner(
+          draft: draft,
+          onContinue: () {
+            Navigator.pop(ctx);
+            _continueDraft(draft);
+          },
+          onDiscard: () {
+            Navigator.pop(ctx);
+            _discardDraft();
+          },
+        ),
+      ),
+    );
+  }
+
+  Future<void> _continueDraft(AssessmentDraft draft) async {
+    final appState = Provider.of<AppState>(context, listen: false);
+    if (draft.company.isNotEmpty) appState.selectCompany(draft.company);
+    if (draft.bu != null && draft.bu!.isNotEmpty) appState.selectBU(draft.bu!);
+    appState.selectSection(draft.section);
+
+    final user = appState.currentUser;
+    if (user != null &&
+        draft.auditorName != null &&
+        draft.auditeeName != null) {
+      appState.setLogin(
+        user,
+        auditor: draft.auditorName,
+        auditee: draft.auditeeName,
+      );
+    }
+
+    setState(() {
+      companyChoice = draft.company;
+      selectedBU = draft.bu;
+      selectedSection = draft.section;
+    });
+
+    await SessionService.instance.saveAssessmentContext(
+      auditor: draft.auditorName,
+      auditee: draft.auditeeName,
+      company: draft.company,
+      bu: draft.bu,
+      section: draft.section,
+      lastRoute: Routes.takeTest,
+    );
+
+    if (!mounted) return;
+    await _openAssessment(resumeDraft: true);
+  }
+
+  Future<void> _discardDraft() async {
+    await AssessmentDraftService.instance.clearDraft();
+    if (!mounted) return;
+    setState(() => _draft = null);
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('Previous assessment draft discarded.'),
+        backgroundColor: Color(0xFF64748B),
+      ),
+    );
+  }
+
+  Future<bool> _handleStartWithDraftCheck() async {
+    if (_draft == null) return true;
+
+    final choice = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Assessment in progress'),
+        content: const Text(
+          'You have an unfinished assessment. Would you like to continue it or start a new one?',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, 'cancel'),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, 'discard'),
+            child: const Text('Start New'),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(ctx, 'continue'),
+            child: const Text('Continue'),
+          ),
+        ],
+      ),
+    );
+
+    if (choice == 'continue') {
+      await _continueDraft(_draft!);
+      return false;
+    }
+    if (choice == 'discard') {
+      await _discardDraft();
+      return true;
+    }
+    return false;
   }
 
   @override
@@ -98,14 +285,14 @@ class _TakeTestScreenState extends State<TakeTestScreen> {
   Future<void> _fetchUserBusinessUnit() async {
     setState(() => isLoadingBU = true);
     try {
-      final currentUser = FirebaseAuth.instance.currentUser;
-      if (currentUser != null) {
-        final employeeId = int.parse(currentUser.email!.split('@').first);
+      final appState = Provider.of<AppState>(context, listen: false);
+      final employeeId = appState.currentUser?.employeeId;
+      if (employeeId != null) {
         final userDoc = await UserService.getUserByEmployeeId(employeeId);
 
         if (userDoc != null) {
-          final userData = userDoc.data() as Map<String, dynamic>;
-          final buField = userData['business_unit'];
+          final userData = Map<String, dynamic>.from(userDoc);
+          final buField = userData['businessUnit'] ?? userData['business_unit'];
 
           String? bu;
           if (buField is Map) {
@@ -138,6 +325,7 @@ class _TakeTestScreenState extends State<TakeTestScreen> {
   @override
   Widget build(BuildContext context) {
     final appState = Provider.of<AppState>(context);
+    final showRoleSwitcher = RoleNavigation.showSwitcherFor(appState);
 
     final String? powerUserBUValue =
         (selectedBU != null && pclBUSections.containsKey(selectedBU))
@@ -147,7 +335,10 @@ class _TakeTestScreenState extends State<TakeTestScreen> {
                 ? userBusinessUnit
                 : null;
 
-    return Scaffold(
+    return LoadingOverlay(
+      isLoading: isLoadingBU || _isStarting,
+      message: isLoadingBU ? 'Loading your profile...' : 'Starting assessment...',
+      child: Scaffold(
       backgroundColor: const Color(0xFFF8FAFC),
       appBar: AppBar(
         title: const Text(
@@ -158,10 +349,24 @@ class _TakeTestScreenState extends State<TakeTestScreen> {
         foregroundColor: Colors.white,
         elevation: 0,
         centerTitle: true,
-        leading: IconButton(
-          icon: const Icon(Icons.arrow_back),
-          onPressed: () => Navigator.of(context).maybePop(),
-        ),
+        automaticallyImplyLeading: !showRoleSwitcher,
+        leading: showRoleSwitcher
+            ? null
+            : IconButton(
+                icon: const Icon(Icons.arrow_back),
+                onPressed: () => Navigator.of(context).maybePop(),
+              ),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.login),
+            tooltip: 'Login',
+            onPressed: () => Navigator.pushNamedAndRemoveUntil(
+              context,
+              Routes.login,
+              (route) => false,
+            ),
+          ),
+        ],
       ),
       body: SingleChildScrollView(
         child: Padding(
@@ -169,7 +374,16 @@ class _TakeTestScreenState extends State<TakeTestScreen> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.center,
             children: [
-              const SizedBox(height: 40),
+              if (_draft != null) ...[
+                AssessmentDraftBanner(
+                  draft: _draft!,
+                  onContinue: () => _continueDraft(_draft!),
+                  onDiscard: _discardDraft,
+                  compact: true,
+                ),
+                const SizedBox(height: 20),
+              ],
+              const SizedBox(height: 20),
               // Top Banner
               Container(
                 width: double.infinity,
@@ -345,6 +559,10 @@ class _TakeTestScreenState extends State<TakeTestScreen> {
                               selectedSection =
                                   null; // Reset section when BU changes
                             });
+                            Provider.of<AppState>(context, listen: false)
+                                .selectBU(value);
+                            Provider.of<AppState>(context, listen: false)
+                                .selectSection(null);
                           },
                         )
                       else if (userBusinessUnit == null ||
@@ -425,6 +643,8 @@ class _TakeTestScreenState extends State<TakeTestScreen> {
                             setState(() {
                               selectedSection = value;
                             });
+                            Provider.of<AppState>(context, listen: false)
+                                .selectSection(value);
                           },
                         ),
                       ],
@@ -451,6 +671,10 @@ class _TakeTestScreenState extends State<TakeTestScreen> {
                           setState(() {
                             selectedBU = value;
                           });
+                          if (value != null) {
+                            Provider.of<AppState>(context, listen: false)
+                                .selectBU(value);
+                          }
                         },
                       ),
                     ],
@@ -485,11 +709,33 @@ class _TakeTestScreenState extends State<TakeTestScreen> {
                 child: Material(
                   color: Colors.transparent,
                   child: InkWell(
-                    onTap: () async {
+                    onTap: _isStarting
+                        ? null
+                        : () async {
+                      setState(() => _isStarting = true);
+                      try {
+                      if (!await _handleStartWithDraftCheck()) return;
+
+                      if (!await RoleNavigation.ensureAuditorAuditee(context)) {
+                        return;
+                      }
+
                       // Validate selections
                       if (companyChoice == 'Packages Convertors Limited') {
                         String buToUse = selectedBU ?? userBusinessUnit ?? '';
-                        if (buToUse.isEmpty || selectedSection == null) return;
+                        if (buToUse.isEmpty || selectedSection == null) {
+                          if (mounted) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(
+                                content: Text(
+                                  'Please select business unit and section.',
+                                ),
+                                backgroundColor: Color(0xFFEF4444),
+                              ),
+                            );
+                          }
+                          return;
+                        }
                         appState.selectCompany(companyChoice);
                         appState.selectBU(buToUse);
                         appState.selectSection(selectedSection!);
@@ -497,7 +743,17 @@ class _TakeTestScreenState extends State<TakeTestScreen> {
                         // Save user's BU/section selection
                         await _saveUserBusinessUnit(buToUse, selectedSection!);
                       } else if (companyChoice == 'Tri-Pack') {
-                        if (selectedBU == null) return;
+                        if (selectedBU == null) {
+                          if (mounted) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(
+                                content: Text('Please select a business unit.'),
+                                backgroundColor: Color(0xFFEF4444),
+                              ),
+                            );
+                          }
+                          return;
+                        }
                         appState.selectCompany(companyChoice);
                         appState.selectBU(selectedBU!);
                         appState.selectSection(null);
@@ -513,25 +769,52 @@ class _TakeTestScreenState extends State<TakeTestScreen> {
                         await _saveUserBusinessUnit('', '');
                       }
 
-                      Navigator.pushNamed(context, Routes.assessment);
+                      await SessionService.instance.saveAssessmentContext(
+                        auditor: appState.auditorName,
+                        auditee: appState.auditeeName,
+                        company: appState.selectedCompany,
+                        bu: appState.selectedBU,
+                        section: appState.selectedSection,
+                        lastRoute: Routes.takeTest,
+                      );
+
+                      await AssessmentDraftService.instance.clearDraft();
+
+                      if (!mounted) return;
+                      await _openAssessment();
+                      } finally {
+                        if (mounted) setState(() => _isStarting = false);
+                      }
                     },
                     borderRadius: BorderRadius.circular(16),
-                    child: const Center(
+                    child: Center(
                       child: Row(
                         mainAxisAlignment: MainAxisAlignment.center,
                         children: [
-                          Icon(
-                            Icons.play_arrow,
-                            color: Colors.white,
-                            size: 24,
-                          ),
-                          SizedBox(width: 8),
-                          Text('Start Assessment',
-                              style: TextStyle(
-                                fontSize: 18,
-                                fontWeight: FontWeight.bold,
+                          if (_isStarting)
+                            const SizedBox(
+                              width: 22,
+                              height: 22,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
                                 color: Colors.white,
-                              )),
+                              ),
+                            )
+                          else
+                            const Icon(
+                              Icons.play_arrow,
+                              color: Colors.white,
+                              size: 24,
+                            ),
+                          const SizedBox(width: 8),
+                          Text(
+                            _isStarting ? 'Starting...' : 'Start Assessment',
+                            style: const TextStyle(
+                              fontSize: 18,
+                              fontWeight: FontWeight.bold,
+                              color: Colors.white,
+                            ),
+                          ),
                         ],
                       ),
                     ),
@@ -544,6 +827,8 @@ class _TakeTestScreenState extends State<TakeTestScreen> {
           ),
         ),
       ),
+      bottomNavigationBar: const RoleBottomNav(current: RoleSection.takeTest),
+    ),
     );
   }
 
@@ -597,21 +882,16 @@ class _TakeTestScreenState extends State<TakeTestScreen> {
   Future<void> _saveUserBusinessUnit(
       String businessUnit, String section) async {
     try {
-      final currentUser = FirebaseAuth.instance.currentUser;
-      if (currentUser == null) return;
-
-      // Get employee ID from email
-      final employeeId = int.parse(currentUser.email!.split('@').first);
+      final appState = Provider.of<AppState>(context, listen: false);
+      final userId = appState.currentUser?.id;
+      if (userId == null || userId.isEmpty) return;
 
       // Find user document
-      final userDoc = await UserService.getUserByEmployeeId(employeeId);
-      if (userDoc != null) {
-        await UserService.updateUserBusinessUnit(
-          userId: userDoc.id,
-          businessUnit: businessUnit,
-          section: section,
-        );
-      }
+      await UserService.updateUserBusinessUnit(
+        userId: userId,
+        businessUnit: businessUnit,
+        section: section,
+      );
     } catch (e) {
       print('Error saving user business unit: $e');
     }

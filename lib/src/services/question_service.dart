@@ -1,12 +1,15 @@
-import 'package:cloud_firestore/cloud_firestore.dart';
+import 'dart:convert';
+
+import 'package:shared_preferences/shared_preferences.dart';
+
+import 'api_service.dart';
+import 'connectivity_service.dart';
 
 class QuestionService {
+  static const String _cacheKey = 'questions_cache_v1';
   static final QuestionService _instance = QuestionService._internal();
   factory QuestionService() => _instance;
   QuestionService._internal();
-
-  final CollectionReference _questionsCollection =
-      FirebaseFirestore.instance.collection('questions');
 
   int _parseOrder(dynamic raw, {int fallback = 0}) {
     if (raw == null) return fallback;
@@ -16,20 +19,49 @@ class QuestionService {
     return fallback;
   }
 
-  Future<List<Map<String, dynamic>>> getQuestions() async {
-    try {
-      print('Fetching questions from Firestore...');
-      final snapshot = await _questionsCollection.orderBy('order').get();
-      print(
-          'Firestore query completed. Found ${snapshot.docs.length} documents.');
+  Future<List<Map<String, dynamic>>> _loadCache() async {
+    final prefs = await SharedPreferences.getInstance();
+    final raw = prefs.getString(_cacheKey);
+    if (raw == null || raw.isEmpty) return [];
+    final decoded = jsonDecode(raw);
+    if (decoded is! List) return [];
+    return decoded
+        .whereType<Map>()
+        .map((m) => Map<String, dynamic>.from(m))
+        .toList();
+  }
 
-      final questions = snapshot.docs.map((doc) {
-        final raw = doc.data();
+  Future<void> _saveCache(List<Map<String, dynamic>> questions) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_cacheKey, jsonEncode(questions));
+  }
+
+  Future<List<Map<String, dynamic>>> getQuestions() async {
+    final online = await ConnectivityService.instance.isOnline();
+    if (!online) {
+      final cached = await _loadCache();
+      if (cached.isNotEmpty) {
+        print('Loaded ${cached.length} questions from offline cache');
+        return cached;
+      }
+      throw Exception(
+        'No internet and no cached questions. Connect once to download questions.',
+      );
+    }
+
+    try {
+      print('Fetching questions from Nest API...');
+      final response = await ApiService.get('/questions');
+      final list = (response is List)
+          ? response
+          : (response['data'] as List<dynamic>? ?? <dynamic>[]);
+
+      final questions = list.map((raw) {
         final data =
             raw is Map ? Map<String, dynamic>.from(raw) : <String, dynamic>{};
 
         final normalized = <String, dynamic>{
-          'id': doc.id,
+          'id': data['id']?.toString() ?? '',
           'question': data['question']?.toString() ?? '',
           'details': data['details']?.toString() ?? '',
           'category': data['category']?.toString() ?? 'SORT',
@@ -44,50 +76,43 @@ class QuestionService {
         return normalized;
       }).toList();
 
+      questions.sort(
+        (a, b) => _parseOrder(a['order']).compareTo(_parseOrder(b['order'])),
+      );
 
-      print('Processed ${questions.length} questions from Firestore.');
+      print('Processed ${questions.length} questions from API.');
+      if (questions.isNotEmpty) {
+        await _saveCache(questions);
+      }
       return questions;
     } catch (e) {
-      print('Firestore error: $e');
-      return [];
+      print('Questions API error: $e');
+      final cached = await _loadCache();
+      if (cached.isNotEmpty) {
+        print('Using cached questions after API error');
+        return cached;
+      }
+      rethrow;
     }
   }
 
   Future<void> updateQuestion(
       String id, Map<String, dynamic> questionData) async {
-    await _questionsCollection.doc(id).update(questionData);
+    await ApiService.patch('/questions/$id', questionData);
   }
 
   Future<void> addQuestion(Map<String, dynamic> questionData) async {
-    // Get the highest order value
-    final snapshot = await _questionsCollection
-        .orderBy('order', descending: true)
-        .limit(1)
-        .get();
-    int nextOrder = 1;
-    if (snapshot.docs.isNotEmpty) {
-      final raw = snapshot.docs.first.data();
-      final data =
-          raw is Map ? Map<String, dynamic>.from(raw) : <String, dynamic>{};
-      nextOrder = _parseOrder(data['order'], fallback: 0) + 1;
-    }
-
-    final dataToSave = Map<String, dynamic>.from(questionData);
-    dataToSave['order'] = nextOrder;
-    await _questionsCollection.add(dataToSave);
+    await ApiService.post('/questions', questionData);
   }
 
   Future<void> deleteQuestion(String id) async {
-    await _questionsCollection.doc(id).delete();
+    await ApiService.delete('/questions/$id');
   }
 
   Future<void> reorderQuestions(List<String> questionIds) async {
-    final batch = FirebaseFirestore.instance.batch();
     for (int i = 0; i < questionIds.length; i++) {
-      final docRef = _questionsCollection.doc(questionIds[i]);
-      batch.update(docRef, {'order': i + 1});
+      await ApiService.patch('/questions/${questionIds[i]}', {'order': i + 1});
     }
-    await batch.commit();
   }
 
   Future<void> initializeDefaultQuestions() async {

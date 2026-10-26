@@ -1,36 +1,26 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
-import 'package:firebase_core/firebase_core.dart';
-import 'package:firebase_app_check/firebase_app_check.dart';
 import 'package:five_s_digital_assessment/app.dart';
+import 'package:five_s_digital_assessment/src/config/api_config.dart';
+import 'package:five_s_digital_assessment/src/services/connectivity_service.dart';
+import 'package:five_s_digital_assessment/src/services/sync_service.dart';
 import 'package:five_s_digital_assessment/src/state/app_state.dart';
-import 'firebase_options.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
   try {
-    // Initialize Firebase FIRST
-    await Firebase.initializeApp(
-      options: DefaultFirebaseOptions.currentPlatform,
-    );
-
-    // Activate Firebase App Check
-    await FirebaseAppCheck.instance.activate(
-      androidProvider: AndroidProvider.debug,
-    );
-
-    print('✅ Firebase initialized successfully');
-    print('✅ App Check debug provider enabled');
-  } catch (e, stackTrace) {
-    print('Firebase initialization error: $e');
-    print('Stack trace: $stackTrace');
-  }
-
-  try {
     final appState = AppState();
     await appState.loadInitial();
 
+    ConnectivityService.instance.addListener((online) {
+      if (!online) return;
+      SyncService.instance.scheduleSync(appState);
+    });
+    ConnectivityService.instance.startListening();
+
+    debugPrint('API base URL: ${ApiConfig.baseUrl}');
     print('✅ AppState initialized successfully');
 
     runApp(

@@ -12,6 +12,7 @@ class QuestionCard extends StatefulWidget {
   final String? initialAnswer;
   final String? initialComment;
   final String? initialImagePath;
+  final List<String>? initialImagePaths;
 
   const QuestionCard({
     super.key,
@@ -24,6 +25,7 @@ class QuestionCard extends StatefulWidget {
     this.initialAnswer,
     this.initialComment,
     this.initialImagePath,
+    this.initialImagePaths,
   });
 
   @override
@@ -35,6 +37,7 @@ class _QuestionCardState extends State<QuestionCard> {
   List<File> selectedImages = [];
   final TextEditingController _commentController = TextEditingController();
   final ImagePicker _picker = ImagePicker();
+  bool _isPickingImage = false;
 
   @override
   void initState() {
@@ -43,11 +46,16 @@ class _QuestionCardState extends State<QuestionCard> {
     if (widget.initialComment != null) {
       _commentController.text = widget.initialComment!;
     }
-    // Handle multiple initial images if any
-    if (widget.initialImagePath != null &&
+    final paths = <String>[];
+    if (widget.initialImagePaths != null &&
+        widget.initialImagePaths!.isNotEmpty) {
+      paths.addAll(widget.initialImagePaths!);
+    } else if (widget.initialImagePath != null &&
         widget.initialImagePath!.isNotEmpty) {
-      // For backward compatibility, handle single image path
-      selectedImages = [File(widget.initialImagePath!)];
+      paths.add(widget.initialImagePath!);
+    }
+    if (paths.isNotEmpty) {
+      selectedImages = paths.map((path) => File(path)).toList();
     }
   }
 
@@ -230,7 +238,7 @@ class _QuestionCardState extends State<QuestionCard> {
                   children: [
                     Expanded(
                       child: OutlinedButton.icon(
-                        onPressed: _pickImage,
+                        onPressed: _isPickingImage ? null : _pickImage,
                         style: OutlinedButton.styleFrom(
                           foregroundColor: const Color(0xFF0891B2),
                           side: const BorderSide(color: Color(0xFF0891B2)),
@@ -239,11 +247,22 @@ class _QuestionCardState extends State<QuestionCard> {
                             borderRadius: BorderRadius.circular(8),
                           ),
                         ),
-                        icon: const Icon(Icons.camera_alt, size: 20),
+                        icon: _isPickingImage
+                            ? const SizedBox(
+                                width: 20,
+                                height: 20,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                  color: Color(0xFF0891B2),
+                                ),
+                              )
+                            : const Icon(Icons.camera_alt, size: 20),
                         label: Text(
-                          selectedImages.isNotEmpty
-                              ? 'Add More Photos'
-                              : 'Add Photo',
+                          _isPickingImage
+                              ? 'Opening camera...'
+                              : (selectedImages.isNotEmpty
+                                  ? 'Add More Photos'
+                                  : 'Add Photo'),
                           style: const TextStyle(fontWeight: FontWeight.w600),
                         ),
                       ),
@@ -614,6 +633,8 @@ class _QuestionCardState extends State<QuestionCard> {
   }
 
   Future<void> _pickImage() async {
+    if (_isPickingImage) return;
+    setState(() => _isPickingImage = true);
     try {
       // Show choice dialog between camera and gallery
       final source = await _showImageSourceDialog();
@@ -668,6 +689,8 @@ class _QuestionCardState extends State<QuestionCard> {
           backgroundColor: const Color(0xFFEF4444),
         ),
       );
+    } finally {
+      if (mounted) setState(() => _isPickingImage = false);
     }
   }
 

@@ -23,6 +23,15 @@ migrate_working_dir/
 # is commented out by default.
 #.vscode/
 
+# Backend (NestJS)
+backend-nest.zip
+/backend-nest/node_modules/
+/backend-nest/dist/
+/backend-nest/.env
+/backend-nest/uploads/
+/backend-nest/keys/
+/backend-nest/coverage/
+
 # Flutter/Dart/Pub related
 **/doc/api/
 **/ios/Flutter/.last_build_id
@@ -47,8 +56,10 @@ app.*.map.json
 # Mail relay node modules
 lib/mail-relay/node_modules/
 
-# Keystore file (sensitive)
+# Android signing (sensitive)
+android/key.properties
 upload-keystore.jks
+android/upload-keystore.jks
 
 # Environment files
 lib/mail-relay/.env

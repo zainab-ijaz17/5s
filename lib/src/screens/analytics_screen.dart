@@ -93,6 +93,8 @@ class _AnalyticsScreenState extends State<AnalyticsScreen> {
       'Lamination',
       'Extrusion',
       'Slitting',
+      'Mechanical Workshop',
+      'Electrical Workshop',
     ];
   }
 

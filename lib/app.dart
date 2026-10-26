@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'routes.dart';
+import 'src/widgets/offline_status_banner.dart';
 
 class MyApp extends StatelessWidget {
   const MyApp({super.key});
@@ -7,7 +8,9 @@ class MyApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: '5S Digital Assessment',
+      builder: (context, child) =>
+          OfflineStatusBanner(child: child ?? const SizedBox.shrink()),
+      title: 'Packages Workplace Apps',
       theme: ThemeData(
         useMaterial3: true,
         colorScheme: ColorScheme.fromSeed(

@@ -21,6 +21,9 @@ class AppState extends ChangeNotifier {
   final Set<String> flaggedBUs = {};
 
   bool isInitialized = false;
+  bool syncInProgress = false;
+  String? lastSyncError;
+  String? syncProgress;
 
   String get _normalizedRole => (currentUser?.role ?? '').toLowerCase();
 
@@ -177,6 +180,28 @@ class AppState extends ChangeNotifier {
     _saveAssessmentsToDisk();
   }
 
+  void markAssessmentSynced(String id) {
+    final idx = assessments.indexWhere((a) => a.id == id);
+    if (idx == -1) return;
+    assessments[idx] = assessments[idx].copyWith(pendingSync: false);
+    notifyListeners();
+    _saveAssessmentsToDisk();
+  }
+
+  int get pendingSyncCount =>
+      assessments.where((a) => a.pendingSync).length;
+
+  void setSyncState({
+    required bool inProgress,
+    String? error,
+    String? progress,
+  }) {
+    syncInProgress = inProgress;
+    lastSyncError = error;
+    syncProgress = inProgress ? progress : null;
+    notifyListeners();
+  }
+
   void updateSubmittedAssessment(SubmittedAssessment updated) {
     final idx = assessments.indexWhere((a) => a.id == updated.id);
 
@@ -186,6 +211,18 @@ class AppState extends ChangeNotifier {
       notifyListeners();
       _saveAssessmentsToDisk();
     }
+  }
+
+  void upsertSubmittedAssessment(SubmittedAssessment assessment) {
+    final idx = assessments.indexWhere((a) => a.id == assessment.id);
+    if (idx != -1) {
+      assessments[idx] = assessment;
+    } else {
+      assessments.add(assessment);
+    }
+    _updateFlaggedBUs();
+    notifyListeners();
+    _saveAssessmentsToDisk();
   }
 
   void resolveAssessment(String id, {String? resolvedBy}) {
@@ -215,51 +252,6 @@ class AppState extends ChangeNotifier {
       _updateFlaggedBUs();
       notifyListeners();
       _saveAssessmentsToDisk();
-    }
-  }
-
-  // ==============================
-  // FOLLOW-UP SWEEP
-  // ==============================
-
-  Future<void> sweepFollowUps(dynamic emailService) async {
-    final now = DateTime.now();
-    bool modified = false;
-
-    for (var i = 0; i < assessments.length; i++) {
-      final sa = assessments[i];
-
-      if (sa.isFlagged &&
-          sa.followUpDueAt != null &&
-          sa.followUpDueAt!.isBefore(now) &&
-          !sa.followUpSent) {
-        await emailService.sendFollowUpEmail(sa);
-
-        assessments[i] = SubmittedAssessment(
-          id: sa.id,
-          company: sa.company,
-          auditorName: sa.auditorName,
-          auditeeName: sa.auditeeName,
-          date: sa.date,
-          items: sa.items,
-          score: sa.score,
-          isFlagged: sa.isFlagged,
-          bu: sa.bu,
-          section: sa.section,
-          followUpDueAt: sa.followUpDueAt,
-          followUpSent: true,
-          resolved: sa.resolved,
-          resolvedAt: sa.resolvedAt,
-          resolvedBy: sa.resolvedBy,
-        );
-
-        modified = true;
-      }
-    }
-
-    if (modified) {
-      notifyListeners();
-      await _saveAssessmentsToDisk();
     }
   }
 }
